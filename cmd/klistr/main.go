@@ -17,8 +17,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/klppl/klistr/internal/ap"
+	"github.com/klppl/klistr/internal/bsky"
 	"github.com/klppl/klistr/internal/config"
 	"github.com/klppl/klistr/internal/db"
 	nostrpkg "github.com/klppl/klistr/internal/nostr"
@@ -117,6 +119,31 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// ─── Bluesky bridge (optional) ────────────────────────────────────────────
+	if cfg.BskyEnabled() {
+		bskyClient := bsky.NewClient(cfg.BskyIdentifier, cfg.BskyAppPassword)
+		if err := bskyClient.Authenticate(ctx); err != nil {
+			slog.Warn("bsky auth failed, bridge disabled", "error", err)
+		} else {
+			nostrHandler.BskyPoster = &bsky.Poster{
+				Client:          bskyClient,
+				Store:           store,
+				LocalDomain:     cfg.LocalDomain,
+				ExternalBaseURL: cfg.ExternalBaseURL,
+			}
+			poller := &bsky.Poller{
+				Client:      bskyClient,
+				Publisher:   publisher,
+				Signer:      signer,
+				Store:       store,
+				LocalPubKey: cfg.NostrPublicKey,
+				Interval:    30 * time.Second,
+			}
+			go poller.Start(ctx)
+			slog.Info("bsky bridge enabled", "identifier", cfg.BskyIdentifier)
+		}
+	}
 
 	// ─── Start relay subscription ─────────────────────────────────────────────
 	pool := nostrpkg.NewRelayPool(cfg.NostrRelays, cfg.NostrRelays, cfg.NostrPublicKey, nostrHandler.Handle)

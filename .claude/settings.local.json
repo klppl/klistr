@@ -12,7 +12,11 @@
       "Bash(go get:*)",
       "WebSearch",
       "WebFetch(domain:docs.joinmastodon.org)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "WebFetch(domain:docs.bsky.app)",
+      "Bash(go vet:*)"
     ]
   }
 }

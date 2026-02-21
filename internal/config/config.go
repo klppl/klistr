@@ -31,6 +31,13 @@ type Config struct {
 	ZapPubkey         string
 	ZapSplit          float64
 	Port              string
+	BskyIdentifier    string // BSKY_IDENTIFIER env var (handle or DID)
+	BskyAppPassword   string // BSKY_APP_PASSWORD env var
+}
+
+// BskyEnabled returns true if Bluesky bridge credentials are configured.
+func (c *Config) BskyEnabled() bool {
+	return c.BskyIdentifier != "" && c.BskyAppPassword != ""
 }
 
 // PrimaryRelay returns the first configured relay, used as the hint relay in event tags.
@@ -96,6 +103,8 @@ func Load() *Config {
 		ZapPubkey:         os.Getenv("ZAP_PUBKEY"),
 		ZapSplit:          parseFloat(os.Getenv("ZAP_SPLIT"), 0.1),
 		Port:              getEnv("PORT", "8000"),
+		BskyIdentifier:    os.Getenv("BSKY_IDENTIFIER"),
+		BskyAppPassword:   os.Getenv("BSKY_APP_PASSWORD"),
 	}
 }
 

@@ -82,6 +82,10 @@ func (s *Store) migrateSQLite() error {
 			pubkey       TEXT NOT NULL PRIMARY KEY,
 			ap_actor_url TEXT NOT NULL UNIQUE
 		)`,
+		`CREATE TABLE IF NOT EXISTS kv (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -110,6 +114,10 @@ func (s *Store) migratePostgres() error {
 		`CREATE TABLE IF NOT EXISTS actor_keys (
 			pubkey       TEXT NOT NULL PRIMARY KEY,
 			ap_actor_url TEXT NOT NULL UNIQUE
+		)`,
+		`CREATE TABLE IF NOT EXISTS kv (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
 		)`,
 	}
 
@@ -265,6 +273,30 @@ func (s *Store) GetActorForKey(pubkey string) (string, bool) {
 		return "", false
 	}
 	return apActorURL, true
+}
+
+// ─── Key-Value store ──────────────────────────────────────────────────────────
+
+// SetKV upserts a key-value pair. Used for persistent state like polling cursors.
+func (s *Store) SetKV(key, value string) error {
+	var q string
+	if s.driver == "sqlite" {
+		q = `INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+	} else {
+		q = `INSERT INTO kv (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`
+	}
+	_, err := s.db.Exec(q, key, value)
+	return err
+}
+
+// GetKV retrieves a value by key. Returns ("", false) if not found.
+func (s *Store) GetKV(key string) (string, bool) {
+	var value string
+	err := s.db.QueryRow(`SELECT value FROM kv WHERE key = `+s.ph(), key).Scan(&value)
+	if err != nil {
+		return "", false
+	}
+	return value, true
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

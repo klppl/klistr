@@ -1,29 +1,30 @@
 # klistr
 
-A **personal bridge** between [Nostr](https://nostr.com/) and the [Fediverse](https://en.wikipedia.org/wiki/Fediverse) (Mastodon, Misskey, Pixelfed, etc.).
+A **personal bridge** between [Nostr](https://nostr.com/), the [Fediverse](https://en.wikipedia.org/wiki/Fediverse) (Mastodon, Misskey, Pixelfed, etc.), and optionally [Bluesky](https://bsky.app).
 
-You run one instance, for yourself. Your Nostr posts appear on the Fediverse. Fediverse users can follow you. It's your identity on both networks, simultaneously.
+You run one instance, for yourself. Your Nostr posts appear on the Fediverse and Bluesky. Fediverse users can follow you. It's your identity across all three networks, simultaneously.
 
 ---
 
 ## What it does
 
-klistr is an **ActivityPub server** and a **Nostr client** running in a single process.
+klistr is an **ActivityPub server** and a **Nostr client** running in a single process. The Bluesky bridge is an optional add-on that mirrors your activity to Bluesky via their API.
 
 ```
 Your Nostr key → relay subscription (author filter)
                        ↓
               nostr.Handler
-                       ↓
-         ap.Federator → POST to AP inboxes
-                            (your Fediverse followers)
+                  ↓         ↓
+       ap.Federator      bsky.Poster
+           ↓                 ↓
+  POST to AP inboxes    Bluesky XRPC API
+  (Fediverse followers) (your Bluesky account)
 
-Fediverse user → POST /inbox
-                       ↓
-              ap.APHandler
-                       ↓
-         Nostr Publisher → relay
-                 (signed with your real key or a derived key)
+Fediverse user → POST /inbox        Bluesky notification poll (30s)
+                       ↓                         ↓
+              ap.APHandler               bsky.Poller
+                       ↓                         ↓
+         Nostr Publisher → relay ←───────────────┘
 ```
 
 ### Protocol mapping
@@ -155,6 +156,79 @@ docker compose up -d
 
 ---
 
+## Bluesky bridge (optional)
+
+The Bluesky bridge works differently from the Fediverse bridge. For ActivityPub, klistr *is* the server — Mastodon talks directly to it. For Bluesky, klistr acts as a **client** to the AT Protocol network, which means **you need a Bluesky account**.
+
+> **Why the difference?** ActivityPub is simple HTTP + JSON, easy to implement server-side from scratch. AT Protocol (Bluesky's protocol) requires a Personal Data Server (PDS) with Merkle tree storage, DID identity management, and a firehose — far too complex to embed in a lightweight bridge.
+
+### Step 1 — Create a Bluesky account
+
+Register at [bsky.app](https://bsky.app) (free). This account will be the Bluesky face of your Nostr identity — think of it as your Bluesky "mirror".
+
+### Step 2 — Use your domain as your Bluesky handle (recommended)
+
+Bluesky supports verified domain handles. Instead of `@alice.bsky.social`, you can be `@yourdomain.com` — the same domain klistr runs on. This has two benefits:
+
+- It immediately signals to Bluesky users that this is a bridge account tied to your real domain/identity
+- It looks like a natural extension of your Nostr/Fediverse identity rather than a separate account
+
+**To set your domain as your Bluesky handle:**
+
+1. In Bluesky: **Settings → Handle → "I have my own domain"**
+2. Bluesky will show you your DID (a string like `did:plc:abc123...`)
+3. Add a DNS TXT record to verify ownership:
+   ```
+   Record type: TXT
+   Host:        _atproto.yourdomain.com
+   Value:       did=did:plc:abc123...
+   ```
+4. Click **Verify** in Bluesky — your handle is now `@yourdomain.com`
+
+If you can't add DNS records, you can instead serve the DID as a file. Create a file at `https://yourdomain.com/.well-known/atproto-did` containing only your DID string (no quotes, just the text).
+
+### Step 3 — Create an app password
+
+Go to **Settings → App Passwords → Add App Password** and create one named `klistr`. Copy the password (it looks like `xxxx-xxxx-xxxx-xxxx`).
+
+> Use an app password, not your main password. App passwords have limited permissions and can be revoked independently.
+
+### Step 4 — Add to your klistr config
+
+```bash
+BSKY_IDENTIFIER=yourdomain.com   # or alice.bsky.social if you skipped domain setup
+BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+```
+
+Restart klistr. You should see this log line on startup:
+
+```
+{"level":"INFO","msg":"bsky bridge enabled","identifier":"yourdomain.com"}
+```
+
+### What gets bridged
+
+| Nostr event | Bluesky action |
+|---|---|
+| Kind 1 (note) | Creates a post |
+| Kind 5 (deletion) | Deletes the bridged post |
+| Kind 6 (repost) | Reposts (if the original was bridged) |
+| Kind 7 `+` (like) | Likes (if the original was bridged) |
+
+| Bluesky notification | Nostr event |
+|---|---|
+| Like on your post | Kind 7 reaction |
+| Repost of your post | Kind 6 repost |
+| Reply / mention | Kind 1 note (with source link) |
+| New follower | NIP-04 DM notification to yourself |
+
+**Notes:**
+- Long Nostr posts (> 300 characters) are truncated and a link to the full post on njump.me is appended.
+- Bluesky is polled every 30 seconds for new notifications.
+- The bridge stores AT URIs in the same database table as ActivityPub IDs, so likes/reposts/deletes can be correctly linked.
+
+---
+
 ## Configuration reference
 
 | Variable | Default | Required | Description |
@@ -171,6 +245,9 @@ docker compose up -d
 | `PORT` | `8000` | No | HTTP server port |
 | `SIGN_FETCH` | `true` | No | Sign outbound HTTP requests (recommended) |
 | `LOG_LEVEL` | `info` | No | `info` or `debug` |
+| `BSKY_IDENTIFIER` | — | No | Bluesky handle or DID (enables Bluesky bridge) |
+| `BSKY_APP_PASSWORD` | — | No | Bluesky app password (Settings → App Passwords) |
+| `EXTERNAL_BASE_URL` | `https://njump.me` | No | Base URL for Nostr links (used in truncated Bluesky posts) |
 
 ---
 

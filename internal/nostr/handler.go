@@ -16,6 +16,11 @@ type FollowStore interface {
 	GetActorForKey(pubkey string) (string, bool)
 }
 
+// BskyPoster is the interface for the optional Bluesky outbound bridge.
+type BskyPoster interface {
+	Handle(ctx context.Context, event *nostr.Event)
+}
+
 // Handler processes incoming Nostr events from the relay subscription
 // and federates them to ActivityPub servers.
 type Handler struct {
@@ -23,6 +28,8 @@ type Handler struct {
 	Federator *ap.Federator
 	// Store enables kind-3 AP follow bridging (optional).
 	Store FollowStore
+	// BskyPoster mirrors events to Bluesky when non-nil.
+	BskyPoster BskyPoster
 }
 
 // Handle processes a single Nostr event.
@@ -58,6 +65,14 @@ func (h *Handler) Handle(ctx context.Context, event *nostr.Event) {
 		h.handleKind7(ctx, event)
 	case 9735:
 		h.handleKind9735(ctx, event)
+	}
+
+	// Mirror to Bluesky if bridge is configured.
+	if h.BskyPoster != nil {
+		go func() {
+			defer func() { recover() }()
+			h.BskyPoster.Handle(ctx, event)
+		}()
 	}
 }
 

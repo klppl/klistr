@@ -157,7 +157,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	// Root — basic info page.
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "klistr — a self-hosted personal bridge that connects your Nostr identity to the Fediverse.\nhttps://github.com/klppl/klistr\n\nRunning on %s\n", s.cfg.LocalDomain)
+		fmt.Fprintf(w, "klistr - a self-hosted personal bridge that connects your Nostr identity to the Fediverse and Bluesky.\nhttps://github.com/klppl/klistr\n\nRunning on %s\n", s.cfg.LocalDomain)
 	})
 
 	// Web admin UI — only mounted when WEB_ADMIN password is configured.

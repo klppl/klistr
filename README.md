@@ -6,7 +6,7 @@ You run one instance, for yourself. Your Nostr posts appear on the Fediverse. Fe
 
 ---
 
-## What it does (technical)
+## What it does
 
 klistr is an **ActivityPub server** and a **Nostr client** running in a single process.
 

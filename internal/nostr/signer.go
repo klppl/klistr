@@ -4,9 +4,11 @@ package nostr
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip04"
 )
 
 // Signer provides signing for both the local Nostr user and derived keys for
@@ -67,4 +69,28 @@ func (s *Signer) PublicKey(apID string) (string, error) {
 // Sign derives a deterministic key for an AP actor and signs the event.
 func (s *Signer) Sign(event *nostr.Event, apID string) error {
 	return event.Sign(s.derivedPrivKey(apID))
+}
+
+// CreateDMToSelf creates a NIP-04 encrypted direct message addressed to the
+// local user's own pubkey. This is used for self-notifications (e.g. new
+// Fediverse follower alerts). The returned event is already signed.
+func (s *Signer) CreateDMToSelf(message string) (*nostr.Event, error) {
+	sharedSecret, err := nip04.ComputeSharedSecret(s.localPubKey, s.localPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("compute shared secret: %w", err)
+	}
+	encrypted, err := nip04.Encrypt(message, sharedSecret)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt DM: %w", err)
+	}
+	event := &nostr.Event{
+		Kind:      4,
+		Content:   encrypted,
+		CreatedAt: nostr.Now(),
+		Tags:      nostr.Tags{{"p", s.localPubKey}},
+	}
+	if err := event.Sign(s.localPrivKey); err != nil {
+		return nil, fmt.Errorf("sign DM: %w", err)
+	}
+	return event, nil
 }

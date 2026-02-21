@@ -20,6 +20,7 @@ type APHandler struct {
 		Sign(event *nostr.Event, apID string) error
 		PublicKey(apID string) (string, error)
 		LocalPublicKey() string
+		CreateDMToSelf(message string) (*nostr.Event, error)
 	}
 	Publisher interface {
 		Publish(ctx context.Context, event *nostr.Event) error
@@ -99,6 +100,10 @@ func (h *APHandler) handleFollow(ctx context.Context, activity IncomingActivity)
 	}, followedID, activity.Actor)
 
 	go h.Federator.Federate(ctx, accept)
+
+	// Notify local user of the new Fediverse follower via a DM to self.
+	go h.sendFollowNotification(ctx, activity.Actor)
+
 	return nil
 }
 
@@ -500,6 +505,48 @@ func (h *APHandler) fetchAndCacheObject(ctx context.Context, objectID string) {
 func (h *APHandler) publishFollows(ctx context.Context, actorID string) {
 	// TODO: Implement full contact list publishing.
 	slog.Debug("publishing follows", "actor", actorID)
+}
+
+// sendFollowNotification delivers a NIP-04 DM to the local user when a
+// Fediverse account follows them.
+func (h *APHandler) sendFollowNotification(ctx context.Context, followerActorURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Try to get a human-readable handle for the follower.
+	handle := followerActorURL
+	if actor, err := FetchActor(ctx, followerActorURL); err == nil && actor != nil {
+		if actor.PreferredUsername != "" {
+			if domain := extractDomain(followerActorURL); domain != "" {
+				handle = "@" + actor.PreferredUsername + "@" + domain
+			}
+		}
+	}
+
+	message := "🔔 New Fediverse follower: " + handle
+
+	event, err := h.Signer.CreateDMToSelf(message)
+	if err != nil {
+		slog.Warn("failed to create follow notification DM", "error", err)
+		return
+	}
+
+	if err := h.Publisher.Publish(ctx, event); err != nil {
+		slog.Warn("failed to publish follow notification DM", "error", err)
+	}
+}
+
+// extractDomain returns the host portion of a URL, or empty string on error.
+func extractDomain(rawURL string) string {
+	// Find the scheme delimiter and then the path start.
+	rest := rawURL
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────

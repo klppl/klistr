@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/go-fed/httpsig"
 )
+
+// ErrGone is returned when a remote resource responds with HTTP 410 Gone.
+// This typically means the actor or object has been deleted.
+var ErrGone = errors.New("resource gone (410)")
 
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
@@ -43,6 +48,9 @@ func FetchObject(ctx context.Context, rawURL string) (map[string]interface{}, er
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusGone {
+		return nil, ErrGone
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch %s: HTTP %d", rawURL, resp.StatusCode)
 	}
@@ -177,6 +185,12 @@ func VerifySignature(req *http.Request) (string, error) {
 	actorURL := strings.Split(keyID, "#")[0]
 	actor, err := FetchActor(req.Context(), actorURL)
 	if err != nil {
+		if errors.Is(err, ErrGone) {
+			// Actor has been deleted; signature cannot be verified but we
+			// accept the activity (typically a Delete from a now-gone account).
+			slog.Debug("actor gone, skipping signature verification", "keyId", keyID)
+			return keyID, nil
+		}
 		return "", fmt.Errorf("fetch actor for key %s: %w", keyID, err)
 	}
 

@@ -303,9 +303,15 @@ func (s *Store) GetKV(key string) (string, bool) {
 
 // StoreStats holds aggregate counts returned by Stats.
 type StoreStats struct {
-	FollowerCount  int
-	ObjectCount    int
-	ActorKeyCount  int
+	// Fediverse bridge
+	FollowerCount    int
+	ActorKeyCount    int
+	FediverseObjects int // objects whose ap_id starts with http (AP URLs)
+	// Bluesky bridge
+	BskyObjects  int   // objects whose ap_id starts with at:// (AT Protocol URIs)
+	BskyLastSeen string // ISO 8601 timestamp from kv table; empty if never polled
+	// Combined
+	TotalObjects int
 }
 
 // Stats returns aggregate counts for the given followed actor URL.
@@ -314,12 +320,20 @@ func (s *Store) Stats(followedID string) (StoreStats, error) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM follows WHERE followed_id = `+s.ph(), followedID).Scan(&st.FollowerCount); err != nil {
 		return st, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects`).Scan(&st.ObjectCount); err != nil {
+	// Fediverse objects have http/https ap_ids; Bluesky objects have at:// ap_ids.
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects WHERE ap_id LIKE 'http%'`).Scan(&st.FediverseObjects); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects WHERE ap_id LIKE 'at://%'`).Scan(&st.BskyObjects); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects`).Scan(&st.TotalObjects); err != nil {
 		return st, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM actor_keys`).Scan(&st.ActorKeyCount); err != nil {
 		return st, err
 	}
+	st.BskyLastSeen, _ = s.GetKV("bsky_last_seen_at")
 	return st, nil
 }
 

@@ -63,7 +63,7 @@ Bluesky notifications poll (30s)  →  bsky.Poller  →  nostr.Publisher  →  r
 
 - **`cmd/klistr/`** — Entry point. Wires all components together: loads config, opens DB, initializes RSA keys, creates handlers, starts relay pool, optional Bluesky bridge, and HTTP server.
 - **`internal/config/`** — Environment variable configuration. `config.Load()` exits on missing `NOSTR_PRIVATE_KEY`. Derives `NostrPublicKey` automatically. `BskyEnabled()` returns true when both `BSKY_IDENTIFIER` and `BSKY_APP_PASSWORD` are set.
-- **`internal/db/`** — Database layer (`db.Store`). Supports SQLite (default, WAL mode) and PostgreSQL. Four tables: `objects` (AP/AT↔Nostr event ID), `follows`, `actor_keys` (derived Nostr pubkey → AP actor URL, for NIP-05 lookups during kind-3 processing), `kv` (key-value store for persistent state like Bluesky notification cursor). Uses `sync.Map` caches to reduce DB round-trips. SQL placeholders differ by driver (`?` vs `$1`, selected via `ph()` helper).
+- **`internal/db/`** — Database layer (`db.Store`). Supports SQLite (default, WAL mode) and PostgreSQL. Four tables: `objects` (AP/AT↔Nostr event ID), `follows`, `actor_keys` (derived Nostr pubkey → AP actor URL, for NIP-05 lookups during kind-3 processing), `kv` (key-value store for persistent state like the Bluesky last-seen timestamp). Uses `sync.Map` caches to reduce DB round-trips. SQL placeholders differ by driver (`?` vs `$1`, selected via `ph()` helper). `Stats(followedID)` returns aggregate counts used by the web admin UI.
 - **`internal/ap/`** — ActivityPub logic:
   - `transmute.go` — Converts Nostr events → AP objects (`ToActor`, `ToNote`, `ToAnnounce`, `ToLike`, etc.) and builds AP activities (`BuildCreate`, `BuildUpdate`, `BuildFollow`, `BuildAccept`). Uses `TransmuteContext` (holds `LocalDomain`, `LocalActorURL`, `PublicKeyPem`, and an object-ID-lookup callback).
   - `handler.go` — `APHandler`: receives incoming AP activities, converts them to Nostr events, publishes to relays. Handles Follow/Unfollow/Delete/Like/Announce. On Follow, notifies local user via NIP-04 DM to self.
@@ -74,9 +74,9 @@ Bluesky notifications poll (30s)  →  bsky.Poller  →  nostr.Publisher  →  r
 - **`internal/bsky/`** — Bluesky (AT Protocol) bridge (optional):
   - `types.go` — Bluesky XRPC request/response structs (Session, FeedPost, Facet, LikeRecord, RepostRecord, Notification, etc.).
   - `client.go` — Thin XRPC HTTP client. `Authenticate` creates a session via `com.atproto.server.createSession`; re-authenticates automatically on 401. Methods: `CreateRecord`, `DeleteRecord`, `ListNotifications`, `GetProfile`.
-  - `transmute.go` — Conversion between Nostr events and Bluesky records. `NostrNoteToFeedPost` truncates to 300 graphemes, builds URL/hashtag facets, resolves reply threading. `NotificationToNostrEvent` maps like/repost/reply/mention → Nostr kinds 7/6/1 with `["proxy", atURI, "atproto"]` tag.
+  - `transmute.go` — Conversion between Nostr events and Bluesky records. `NostrNoteToFeedPost` truncates to 300 graphemes, builds URL/hashtag facets, resolves reply threading. `NotificationToNostrEvent` maps like/repost → Nostr kinds 7/6 with `["proxy", atURI, "atproto"]` tag. `extractReplyRefs` pulls parent/root AT URIs from a reply record for thread reconstruction.
   - `poster.go` — `Poster`: outbound bridge. Handles kind-1 (post), kind-5 (delete), kind-6 (repost), kind-7 "+" (like). Guards against double-bridging via `GetAPIDForObject`. Stores AT URI ↔ Nostr event ID mappings.
-  - `poller.go` — `Poller`: inbound bridge. Polls `app.bsky.notification.listNotifications` every 30s. Converts notifications to Nostr events and publishes them. Sends NIP-04 self-DM on new follower. Saves cursor to `kv` table for resumption.
+  - `poller.go` — `Poller`: inbound bridge. Polls `app.bsky.notification.listNotifications` every 30s (always fetches latest; uses `bsky_last_seen_at` timestamp in `kv` to skip already-processed notifications). Like/repost → Nostr kind-7/6. Reply → threaded Nostr kind-1 signed with a derived key for the Bluesky author's DID (stores AT URI ↔ Nostr event ID so the local user can reply back into the thread); falls back to NIP-04 self-DM if the parent post isn't in the DB. Mention/quote → NIP-04 self-DM. New follower → NIP-04 self-DM. Optional `TriggerCh` channel allows immediate poll (used by web admin UI).
 - **`internal/nostr/`** — Nostr protocol handling:
   - `signer.go` — `Signer`: dual signing — `SignAsUser` uses the real private key; `Sign(event, apID)` derives a deterministic key via `SHA-256(localPrivKey + ":" + apActorID)`. Derived keys cached with `sync.RWMutex`. Also provides `CreateDMToSelf()` (NIP-04 encrypted kind-4 event) for follower notifications.
   - `relay.go` — `RelayPool`: subscribes to a single author's events (kinds 0,1,3,5,6,7,9735) with author filter. Auto-reconnects with 5s backoff. `Publisher`: publishes events to write relays.
@@ -88,6 +88,8 @@ Bluesky notifications poll (30s)  →  bsky.Poller  →  nostr.Publisher  →  r
   - `GET /objects/{id}` — AP Note objects
   - `GET /api/healthcheck`
   - Returns 404 for any username that isn't the configured `NostrUsername`.
+  - `admin.go` — Web admin UI (mounted at `/web` only when `WEB_ADMIN` is set). HTTP Basic Auth. Endpoints: `GET /web/` (dashboard HTML), `GET /web/log/stream` (SSE live log), `GET /web/api/status`, `GET /web/api/stats`, `GET /web/api/followers`, `POST /web/api/sync-bsky`.
+  - `logbroadcast.go` — `LogBroadcaster`: `io.Writer` that captures every slog line, maintains a 500-line ring buffer, and fans out to SSE subscribers. Wraps `os.Stdout` when `WEB_ADMIN` is set.
 
 ### Identity
 
@@ -109,9 +111,13 @@ Three layers:
 - Migrations are idempotent (`CREATE TABLE IF NOT EXISTS`, `INSERT OR IGNORE`)
 - Follows are stored with full AP actor URLs as both `follower_id` and `followed_id`
 
-### NIP-04 Self-Notification
+### NIP-04 Self-Notifications
 
-When a new Fediverse Follow is received, `handleFollow()` asynchronously sends a NIP-04 encrypted kind-4 DM to the local user's own pubkey: `"🔔 New Fediverse follower: @username@domain"`. The shared secret is derived from the local pubkey/privkey pair (self-addressed).
+Several events trigger a NIP-04 encrypted kind-4 DM to the local user's own pubkey (shared secret derived from the local pubkey/privkey pair — self-addressed):
+- New Fediverse follower: `"🔔 New Fediverse follower: @username@domain"`
+- New Bluesky follower: `"🔔 New Bluesky follower: @handle.bsky.social"`
+- Bluesky mention or quote: `"💬 New Bluesky mention/quote from @handle: ..."`
+- Bluesky reply where the parent post is not in the DB (fallback from thread bridging)
 
 ## Module
 

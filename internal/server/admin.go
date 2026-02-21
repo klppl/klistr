@@ -35,14 +35,15 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	type statusResponse struct {
-		Domain        string   `json:"domain"`
-		Username      string   `json:"username"`
-		Npub          string   `json:"npub"`
-		PubkeyShort   string   `json:"pubkey_short"`
-		BskyEnabled   bool     `json:"bsky_enabled"`
-		BskyIdentifier string  `json:"bsky_identifier,omitempty"`
-		Relays        []string `json:"relays"`
-		Version       string   `json:"version"`
+		Domain         string   `json:"domain"`
+		Username       string   `json:"username"`
+		Npub           string   `json:"npub"`
+		PubkeyShort    string   `json:"pubkey_short"`
+		BskyEnabled    bool     `json:"bsky_enabled"`
+		BskyIdentifier string   `json:"bsky_identifier,omitempty"`
+		Relays         []string `json:"relays"`
+		Version        string   `json:"version"`
+		StartedAt      int64    `json:"started_at"` // unix timestamp
 	}
 
 	resp := statusResponse{
@@ -53,6 +54,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		BskyEnabled: s.cfg.BskyEnabled(),
 		Relays:      s.cfg.NostrRelays,
 		Version:     version,
+		StartedAt:   s.startedAt.Unix(),
 	}
 	if s.cfg.BskyEnabled() {
 		resp.BskyIdentifier = s.cfg.BskyIdentifier
@@ -68,10 +70,14 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, map[string]int{
-		"followers":  stats.FollowerCount,
-		"objects":    stats.ObjectCount,
-		"actor_keys": stats.ActorKeyCount,
+	jsonResponse(w, map[string]interface{}{
+		"bsky_enabled":        s.cfg.BskyEnabled(),
+		"fediverse_followers": stats.FollowerCount,
+		"fediverse_actors":    stats.ActorKeyCount,
+		"fediverse_objects":   stats.FediverseObjects,
+		"bsky_objects":        stats.BskyObjects,
+		"bsky_last_seen":      stats.BskyLastSeen,
+		"total_objects":       stats.TotalObjects,
 	}, http.StatusOK)
 }
 
@@ -160,7 +166,6 @@ func (s *Server) handleAdminLogStream(w http.ResponseWriter, r *http.Request) {
 
 // jsonEscapeSSE ensures newlines inside JSON don't break the SSE framing.
 func jsonEscapeSSE(s string) string {
-	// SSE data fields cannot contain raw newlines — replace with space.
 	return strings.ReplaceAll(s, "\n", " ")
 }
 
@@ -174,126 +179,248 @@ const adminHTML = `<!DOCTYPE html>
 <title>klistr admin</title>
 <style>
 :root {
-  --bg: #0d1117; --surface: #161b22; --surface2: #1c2128;
-  --border: #30363d; --text: #e6edf3; --muted: #8b949e;
-  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922; --red: #f85149;
-  --purple: #a371f7;
+  --bg:#0d1117; --surface:#161b22; --surface2:#1c2128;
+  --border:#30363d; --text:#e6edf3; --muted:#8b949e;
+  --green:#3fb950; --blue:#58a6ff; --yellow:#d29922; --red:#f85149;
+  --purple:#a371f7; --sky:#38bdf8;
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.5; }
-.layout { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
-.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-.header h1 { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
-.header h1 span { font-size: 11px; font-weight: 400; color: var(--muted); background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
-.header a { color: var(--muted); text-decoration: none; font-size: 13px; }
-.header a:hover { color: var(--text); }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-@media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-.card-full { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
-.card h2 { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 14px; }
-.kv { display: grid; grid-template-columns: 130px 1fr; gap: 5px 12px; align-items: start; }
-.kv .k { color: var(--muted); white-space: nowrap; padding-top: 1px; }
-.kv .v { color: var(--text); font-family: 'SF Mono', Consolas, monospace; font-size: 12px; word-break: break-all; }
-.badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 500; font-family: inherit; }
-.badge::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.badge-green { background: rgba(63,185,80,.15); color: var(--green); }
-.badge-muted  { background: rgba(139,148,158,.12); color: var(--muted); }
-.stats-row { display: flex; gap: 0; }
-.stat { flex: 1; text-align: center; padding: 12px 8px; border-right: 1px solid var(--border); }
-.stat:last-child { border-right: none; }
-.stat .num { font-size: 32px; font-weight: 700; color: var(--blue); line-height: 1; }
-.stat .lbl { color: var(--muted); font-size: 11px; margin-top: 6px; }
-.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity .15s, transform .1s; }
-.btn:active { transform: scale(.97); }
-.btn:hover:not(:disabled) { opacity: .85; }
-.btn-blue { background: var(--blue); color: #fff; }
-.btn-surface { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
-.btn:disabled { opacity: .4; cursor: not-allowed; }
-.action-msg { font-size: 12px; color: var(--muted); margin-top: 10px; min-height: 18px; }
-#log-wrap { position: relative; }
-#log { background: #010409; border: 1px solid var(--border); border-radius: 6px; height: 420px; overflow-y: auto; padding: 10px 14px; font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace; font-size: 12px; line-height: 1.65; scroll-behavior: smooth; }
-.ll { white-space: pre-wrap; word-break: break-all; }
-.ll.INFO  { color: #c9d1d9; }
-.ll.DEBUG { color: #484f58; }
-.ll.WARN  { color: var(--yellow); }
-.ll.ERROR { color: var(--red); }
-.log-indicator { position: absolute; top: -8px; right: 8px; font-size: 11px; padding: 1px 8px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); }
-.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; background: var(--muted); }
-.dot.live { background: var(--green); animation: pulse 2s infinite; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-.relays-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
-.relay-tag { background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-size: 11px; font-family: monospace; color: var(--muted); }
-.followers-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; margin-top: 4px; }
-.follower { font-size: 12px; font-family: monospace; color: var(--text); padding: 4px 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.follower a { color: var(--blue); text-decoration: none; }
-.follower a:hover { text-decoration: underline; }
-.empty { color: var(--muted); font-size: 12px; font-style: italic; }
-.toast { position: fixed; bottom: 20px; right: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .3s; z-index: 999; }
-.toast.show { opacity: 1; pointer-events: auto; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.5}
+.layout{max-width:1060px;margin:0 auto;padding:24px 16px}
+
+/* Header */
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.header h1{font-size:18px;font-weight:600;display:flex;align-items:center;gap:10px}
+.vtag{font-size:11px;font-weight:400;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px}
+.header-right{display:flex;align-items:center;gap:16px}
+.uptime-badge{font-size:11px;color:var(--muted)}
+.header a{color:var(--muted);text-decoration:none;font-size:13px}
+.header a:hover{color:var(--text)}
+
+/* Grids */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+
+/* Cards */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px}
+.card-full{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px}
+.card h2,.card-full h2{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}
+
+/* Key-value */
+.kv{display:grid;grid-template-columns:110px 1fr;gap:5px 12px;align-items:start}
+.kv .k{color:var(--muted);white-space:nowrap;padding-top:2px;font-size:13px}
+.kv .v{color:var(--text);font-family:'SF Mono',Consolas,monospace;font-size:12px;word-break:break-all;display:flex;align-items:center;gap:6px}
+
+/* Badges */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:500}
+.badge::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor}
+.badge-green{background:rgba(63,185,80,.15);color:var(--green)}
+.badge-muted{background:rgba(139,148,158,.12);color:var(--muted)}
+
+/* Copy button */
+.copy-btn{background:none;border:none;cursor:pointer;color:var(--muted);padding:0 2px;display:inline-flex;align-items:center;opacity:.6;transition:opacity .15s}
+.copy-btn:hover{opacity:1;color:var(--blue)}
+
+/* Quick links */
+.quick-links{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+.qlink{font-size:11px;color:var(--blue);text-decoration:none;display:flex;align-items:center;gap:4px}
+.qlink:hover{text-decoration:underline}
+
+/* Relay tags */
+.relays-list{display:flex;flex-wrap:wrap;gap:6px}
+.relay-tag{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:3px 9px;font-size:11px;font-family:monospace;color:var(--muted);display:flex;align-items:center;gap:6px}
+.relay-dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
+
+/* Bridge panels */
+.bridge-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:720px){.bridge-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:380px){.bridge-grid{grid-template-columns:1fr}}
+.bp{border:1px solid var(--border);border-radius:8px;overflow:hidden;border-left:3px solid transparent}
+.bp-nostr{border-left-color:var(--purple)}
+.bp-fediverse{border-left-color:var(--blue)}
+.bp-bsky{border-left-color:var(--sky)}
+.bp-total{border-left-color:var(--green)}
+.bp-header{padding:10px 14px 8px;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:7px}
+.bp-nostr .bp-header{color:var(--purple)}
+.bp-fediverse .bp-header{color:var(--blue)}
+.bp-bsky .bp-header{color:var(--sky)}
+.bp-total .bp-header{color:var(--green)}
+.bp-body{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.bp-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.bpl{color:var(--muted);font-size:12px;white-space:nowrap}
+.bpv{font-weight:600;font-size:14px;color:var(--text);font-family:'SF Mono',Consolas,monospace;text-align:right}
+.bpv.big{font-size:24px;font-family:inherit}
+.bpv.sm{font-size:11px}
+
+/* Followers */
+.followers-list{display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto}
+.follower{font-size:12px;padding:5px 10px;background:var(--surface2);border-radius:5px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.f-handle{font-family:monospace;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.follower a{color:var(--blue);text-decoration:none;font-size:11px;flex-shrink:0;opacity:.7}
+.follower a:hover{opacity:1;text-decoration:underline}
+.empty{color:var(--muted);font-size:12px;font-style:italic}
+
+/* Actions */
+.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;transition:opacity .15s,transform .1s;font-family:inherit}
+.btn:active{transform:scale(.97)}
+.btn:hover:not(:disabled){opacity:.85}
+.btn-blue{background:var(--blue);color:#000}
+.btn-surface{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
+.btn-red{background:var(--surface2);color:var(--red);border:1px solid var(--border)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.action-msg{font-size:12px;color:var(--muted);margin-top:10px;min-height:18px}
+
+/* Log */
+.log-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.lfb{padding:4px 11px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer;font-size:11px;font-weight:500;font-family:inherit;transition:all .15s}
+.lfb.active{color:var(--text);border-color:var(--muted)}
+.lfb[data-level=INFO].active{border-color:var(--blue);color:var(--blue)}
+.lfb[data-level=WARN].active{border-color:var(--yellow);color:var(--yellow)}
+.lfb[data-level=ERROR].active{border-color:var(--red);color:var(--red)}
+.lfb[data-level=DEBUG].active{border-color:var(--purple);color:var(--purple)}
+.log-sep{width:1px;height:18px;background:var(--border);margin:0 2px}
+.log-wrap{position:relative}
+#log{background:#010409;border:1px solid var(--border);border-radius:6px;height:440px;overflow-y:auto;padding:10px 14px;font-family:'JetBrains Mono','Fira Code','SF Mono',Consolas,monospace;font-size:12px;line-height:1.65;scroll-behavior:smooth}
+.ll{white-space:pre-wrap;word-break:break-all}
+.ll.INFO{color:#c9d1d9}
+.ll.DEBUG{color:#484f58}
+.ll.WARN{color:var(--yellow)}
+.ll.ERROR{color:var(--red)}
+.log-indicator{position:absolute;top:-8px;right:8px;font-size:11px;padding:1px 8px;border-radius:10px;background:var(--surface);border:1px solid var(--border)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;background:var(--muted)}
+.dot.live{background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* Toast */
+.toast{position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .3s;z-index:999}
+.toast.show{opacity:1;pointer-events:auto}
 </style>
 </head>
 <body>
 <div class="layout">
 
+<!-- Header -->
 <div class="header">
-  <h1>klistr admin <span id="hdr-version">—</span></h1>
-  <a href="/">← public root</a>
+  <h1>klistr <span class="vtag" id="hdr-version">…</span></h1>
+  <div class="header-right">
+    <span class="uptime-badge">up <span id="hdr-uptime">—</span></span>
+    <a href="/">← public root</a>
+  </div>
 </div>
 
-<div class="grid">
-  <!-- Status card -->
+<!-- Row 1: Node + Relays -->
+<div class="grid2">
   <div class="card">
     <h2>Node</h2>
     <div class="kv" id="status-kv">
       <span class="k">loading…</span><span class="v"></span>
     </div>
+    <div class="quick-links" id="quick-links" style="display:none">
+      <a class="qlink" id="ql-actor" href="#" target="_blank" rel="noopener">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        AP Profile
+      </a>
+      <a class="qlink" id="ql-njump" href="#" target="_blank" rel="noopener">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Nostr Profile
+      </a>
+      <a class="qlink" id="ql-wf" href="#" target="_blank" rel="noopener">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        WebFinger
+      </a>
+    </div>
   </div>
 
-  <!-- Stats card -->
   <div class="card">
-    <h2>Stats</h2>
-    <div class="stats-row">
-      <div class="stat"><div class="num" id="s-followers">—</div><div class="lbl">Fediverse Followers</div></div>
-      <div class="stat"><div class="num" id="s-objects">—</div><div class="lbl">Bridged Objects</div></div>
-      <div class="stat"><div class="num" id="s-actors">—</div><div class="lbl">Known AP Actors</div></div>
-    </div>
+    <h2>Configured Relays</h2>
+    <div class="relays-list" id="relays-list"><span class="empty">loading…</span></div>
   </div>
 </div>
 
-<!-- Followers -->
+<!-- Row 2: Bridge Activity -->
+<div class="card-full">
+  <h2>Bridge Activity</h2>
+  <div class="bridge-grid">
+
+    <!-- Nostr panel -->
+    <div class="bp bp-nostr">
+      <div class="bp-header">⚡ Nostr</div>
+      <div class="bp-body">
+        <div class="bp-row"><span class="bpl">Relays</span><span class="bpv" id="bp-relays">—</span></div>
+        <div class="bp-row"><span class="bpl">Npub</span><span class="bpv sm" id="bp-npub">—</span></div>
+      </div>
+    </div>
+
+    <!-- Fediverse panel -->
+    <div class="bp bp-fediverse">
+      <div class="bp-header">🌐 Fediverse</div>
+      <div class="bp-body">
+        <div class="bp-row"><span class="bpl">Followers</span><span class="bpv big" id="bp-ap-followers">—</span></div>
+        <div class="bp-row"><span class="bpl">Known actors</span><span class="bpv" id="bp-ap-actors">—</span></div>
+        <div class="bp-row"><span class="bpl">Objects</span><span class="bpv" id="bp-ap-objects">—</span></div>
+      </div>
+    </div>
+
+    <!-- Bluesky panel -->
+    <div class="bp bp-bsky">
+      <div class="bp-header">☁ Bluesky</div>
+      <div class="bp-body" id="bp-bsky-body">
+        <div class="bp-row"><span class="bpl">Status</span><span class="bpv"><span class="badge badge-muted">disabled</span></span></div>
+      </div>
+    </div>
+
+    <!-- Total panel -->
+    <div class="bp bp-total">
+      <div class="bp-header">∑ Total</div>
+      <div class="bp-body">
+        <div class="bp-row"><span class="bpl">Objects</span><span class="bpv big" id="bp-total-obj">—</span></div>
+        <div class="bp-row"><span class="bpl">Followers</span><span class="bpv" id="bp-total-fol">—</span></div>
+        <div class="bp-row"><span class="bpl">Actors</span><span class="bpv" id="bp-total-act">—</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Row 3: Fediverse Followers -->
 <div class="card-full">
   <h2>Fediverse Followers</h2>
   <div class="followers-list" id="followers-list"><span class="empty">loading…</span></div>
 </div>
 
-<!-- Actions -->
+<!-- Row 4: Actions -->
 <div class="card-full">
   <h2>Actions</h2>
   <div class="actions">
     <button class="btn btn-blue" id="btn-bsky-sync" onclick="syncBsky()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       Force Bluesky Sync
     </button>
     <button class="btn btn-surface" onclick="refreshAll()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-      Refresh
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Refresh Stats
     </button>
   </div>
   <div class="action-msg" id="action-msg"></div>
 </div>
 
-<!-- Relays -->
-<div class="card-full">
-  <h2>Configured Relays</h2>
-  <div class="relays-list" id="relays-list"><span class="empty">loading…</span></div>
-</div>
-
-<!-- Live Log -->
+<!-- Row 5: Live Log -->
 <div class="card-full">
   <h2>Live Log</h2>
-  <div id="log-wrap">
+  <div class="log-toolbar">
+    <button class="lfb active" data-level="ALL"   onclick="setLogFilter('ALL')">All</button>
+    <button class="lfb"        data-level="DEBUG"  onclick="setLogFilter('DEBUG')">Debug</button>
+    <button class="lfb"        data-level="INFO"   onclick="setLogFilter('INFO')">Info</button>
+    <button class="lfb"        data-level="WARN"   onclick="setLogFilter('WARN')">Warn</button>
+    <button class="lfb"        data-level="ERROR"  onclick="setLogFilter('ERROR')">Error</button>
+    <div class="log-sep"></div>
+    <button class="btn btn-red" style="padding:4px 12px;font-size:11px" onclick="clearLog()">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+      Clear
+    </button>
+  </div>
+  <div class="log-wrap">
     <div class="log-indicator"><span class="dot" id="dot"></span><span id="log-status">connecting</span></div>
     <div id="log"></div>
   </div>
@@ -307,16 +434,62 @@ const MAX_LINES = 600;
 let lineCount = 0;
 let autoScroll = true;
 let bskyEnabled = false;
+let startedAt = 0;
+let activeFilter = 'ALL';
+let _npub = '';
 
-// ── Toast ──────────────────────────────────────────────────────────────────
+const levelOrder = {DEBUG:0, INFO:1, WARN:2, ERROR:3};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 function toast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 3000);
 }
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => toast('Copied!')).catch(()=>{});
+}
+function copyIcon() {
+  return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+}
+function formatUptime(ts) {
+  if (!ts) return '—';
+  const sec = Math.floor(Date.now()/1000) - ts;
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  if (h > 0) return h+'h '+m+'m';
+  if (m > 0) return m+'m '+s+'s';
+  return s+'s';
+}
+function relativeTime(iso) {
+  if (!iso) return '—';
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 10) return 'just now';
+  if (diff < 60) return diff+'s ago';
+  if (diff < 3600) return Math.floor(diff/60)+'m ago';
+  if (diff < 86400) return Math.floor(diff/3600)+'h ago';
+  return Math.floor(diff/86400)+'d ago';
+}
+// Parse AP actor URL → @user@domain display string.
+function formatFollowerURL(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.replace(/\/$/,'').split('/').filter(Boolean);
+    let username = parts[parts.length-1] || '';
+    username = username.replace(/^@/,'');
+    if (username) return '@'+username+'@'+u.host;
+  } catch {}
+  return url;
+}
+function updateUptime() {
+  const el = document.getElementById('hdr-uptime');
+  if (el && startedAt) el.textContent = formatUptime(startedAt);
+}
 
-// ── Log ───────────────────────────────────────────────────────────────────
+// ── Log ──────────────────────────────────────────────────────────────────────
 const logEl = document.getElementById('log');
 logEl.addEventListener('scroll', () => {
   autoScroll = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
@@ -325,19 +498,22 @@ logEl.addEventListener('scroll', () => {
 function appendLog(raw) {
   const div = document.createElement('div');
   div.className = 'll';
+  let lvl = 'INFO';
   try {
     const j = JSON.parse(raw);
-    const lvl = (j.level || 'INFO').toUpperCase();
+    lvl = (j.level||'INFO').toUpperCase();
     div.classList.add(lvl);
-    const ts  = j.time ? new Date(j.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+    const ts  = j.time ? new Date(j.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
     const msg = j.msg || '';
     const extras = Object.entries(j)
       .filter(([k]) => !['time','level','msg'].includes(k))
-      .map(([k,v]) => k + '=' + (typeof v === 'string' ? v : JSON.stringify(v)))
+      .map(([k,v]) => k+'='+(typeof v==='string' ? v : JSON.stringify(v)))
       .join('  ');
     div.textContent = [ts, lvl.padEnd(5), msg, extras].filter(Boolean).join('  ');
-  } catch {
-    div.textContent = raw;
+  } catch { div.textContent = raw; }
+
+  if (activeFilter !== 'ALL' && levelOrder[lvl] < levelOrder[activeFilter]) {
+    div.style.display = 'none';
   }
   logEl.appendChild(div);
   lineCount++;
@@ -345,6 +521,22 @@ function appendLog(raw) {
   if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
 }
 
+function setLogFilter(level) {
+  activeFilter = level;
+  document.querySelectorAll('.lfb').forEach(b => b.classList.toggle('active', b.dataset.level === level));
+  logEl.querySelectorAll('.ll').forEach(el => {
+    const elLvl = [...el.classList].find(c => levelOrder[c] !== undefined) || 'INFO';
+    el.style.display = (level==='ALL' || levelOrder[elLvl] >= levelOrder[level]) ? '' : 'none';
+  });
+}
+
+function clearLog() {
+  logEl.innerHTML = '';
+  lineCount = 0;
+  toast('Log cleared');
+}
+
+// ── SSE log stream ───────────────────────────────────────────────────────────
 function connectLog() {
   const dot = document.getElementById('dot');
   const status = document.getElementById('log-status');
@@ -357,37 +549,52 @@ function connectLog() {
   };
 }
 
-// ── Status ────────────────────────────────────────────────────────────────
+// ── Status ───────────────────────────────────────────────────────────────────
 async function loadStatus() {
   const r = await fetch('/web/api/status');
   const d = await r.json();
   bskyEnabled = d.bsky_enabled;
-
-  document.getElementById('hdr-version').textContent = 'v' + d.version;
+  startedAt   = d.started_at;
+  _npub       = d.npub || '';
+  document.getElementById('hdr-version').textContent = 'v'+d.version;
+  updateUptime();
 
   const kv = document.getElementById('status-kv');
   kv.innerHTML = '';
-  function row(k, v, html) {
-    const ke = document.createElement('span'); ke.className = 'k'; ke.textContent = k;
-    const ve = document.createElement('span'); ve.className = 'v';
-    if (html) ve.innerHTML = v; else ve.textContent = v;
+  function row(k, html) {
+    const ke = document.createElement('span'); ke.className='k'; ke.textContent=k;
+    const ve = document.createElement('span'); ve.className='v'; ve.innerHTML=html;
     kv.appendChild(ke); kv.appendChild(ve);
   }
-  row('Domain',   d.domain);
-  row('Username', '@' + d.username);
-  row('Npub',     d.npub);
-  row('Pubkey',   d.pubkey_short);
+  row('Domain',   esc(d.domain));
+  row('Username', '@'+esc(d.username));
+  row('Npub',     esc(d.npub)+' <button class="copy-btn" title="Copy npub" onclick="copyText(_npub)">'+copyIcon()+'</button>');
   row('Bluesky',  d.bsky_enabled
-    ? '<span class="badge badge-green">enabled — ' + d.bsky_identifier + '</span>'
-    : '<span class="badge badge-muted">disabled</span>', true);
+    ? '<span class="badge badge-green">enabled — '+esc(d.bsky_identifier)+'</span>'
+    : '<span class="badge badge-muted">disabled</span>');
+
+  // Quick links
+  const ql = document.getElementById('quick-links');
+  ql.style.display = '';
+  document.getElementById('ql-actor').href  = d.domain+'/users/'+d.username;
+  document.getElementById('ql-njump').href  = 'https://njump.me/'+d.npub;
+  try {
+    const wfHost = new URL(d.domain).host;
+    document.getElementById('ql-wf').href = d.domain+'/.well-known/webfinger?resource=acct:'+d.username+'@'+wfHost;
+  } catch {}
 
   // Relay tags
   const rl = document.getElementById('relays-list');
   rl.innerHTML = '';
-  (d.relays || []).forEach(r => {
-    const t = document.createElement('span'); t.className = 'relay-tag'; t.textContent = r;
+  (d.relays||[]).forEach(relay => {
+    const t = document.createElement('span'); t.className='relay-tag';
+    t.innerHTML = '<span class="relay-dot"></span>'+esc(relay);
     rl.appendChild(t);
   });
+
+  // Nostr bridge panel
+  document.getElementById('bp-relays').textContent = (d.relays||[]).length;
+  document.getElementById('bp-npub').textContent   = d.npub ? d.npub.slice(0,20)+'…' : '—';
 
   if (!d.bsky_enabled) {
     const btn = document.getElementById('btn-bsky-sync');
@@ -396,16 +603,32 @@ async function loadStatus() {
   }
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────────
+// ── Stats ────────────────────────────────────────────────────────────────────
 async function loadStats() {
   const r = await fetch('/web/api/stats');
   const d = await r.json();
-  document.getElementById('s-followers').textContent = d.followers;
-  document.getElementById('s-objects').textContent   = d.objects;
-  document.getElementById('s-actors').textContent    = d.actor_keys;
+
+  // Fediverse panel
+  document.getElementById('bp-ap-followers').textContent = d.fediverse_followers ?? '—';
+  document.getElementById('bp-ap-actors').textContent    = d.fediverse_actors    ?? '—';
+  document.getElementById('bp-ap-objects').textContent   = d.fediverse_objects   ?? '—';
+
+  // Bluesky panel
+  const bskyBody = document.getElementById('bp-bsky-body');
+  if (d.bsky_enabled) {
+    bskyBody.innerHTML =
+      '<div class="bp-row"><span class="bpl">Status</span><span class="bpv"><span class="badge badge-green">active</span></span></div>'+
+      '<div class="bp-row"><span class="bpl">Objects</span><span class="bpv big">'+esc(String(d.bsky_objects??'—'))+'</span></div>'+
+      '<div class="bp-row"><span class="bpl">Last sync</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_seen))+'</span></div>';
+  }
+
+  // Total panel
+  document.getElementById('bp-total-obj').textContent = d.total_objects       ?? '—';
+  document.getElementById('bp-total-fol').textContent = d.fediverse_followers ?? '—';
+  document.getElementById('bp-total-act').textContent = d.fediverse_actors    ?? '—';
 }
 
-// ── Followers ─────────────────────────────────────────────────────────────
+// ── Followers ────────────────────────────────────────────────────────────────
 async function loadFollowers() {
   const r = await fetch('/web/api/followers');
   const d = await r.json();
@@ -416,42 +639,45 @@ async function loadFollowers() {
     return;
   }
   d.items.forEach(url => {
-    const div = document.createElement('div');
-    div.className = 'follower';
-    div.innerHTML = '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
+    const div = document.createElement('div'); div.className='follower';
+    const handle = formatFollowerURL(url);
+    div.innerHTML = '<span class="f-handle">'+esc(handle)+'</span>'+
+      '<a href="'+esc(url)+'" target="_blank" rel="noopener">→ profile</a>';
     el.appendChild(div);
   });
 }
 
-// ── Actions ───────────────────────────────────────────────────────────────
+// ── Actions ──────────────────────────────────────────────────────────────────
 async function syncBsky() {
   const btn = document.getElementById('btn-bsky-sync');
   btn.disabled = true;
+  const orig = btn.innerHTML;
   btn.textContent = 'Triggering…';
   try {
-    const r = await fetch('/web/api/sync-bsky', { method: 'POST' });
+    const r = await fetch('/web/api/sync-bsky', {method:'POST'});
     const d = await r.json();
     document.getElementById('action-msg').textContent = d.message;
     toast(d.message);
-  } catch (e) {
-    document.getElementById('action-msg').textContent = 'Error: ' + e.message;
+    setTimeout(loadStats, 2000);
+  } catch(e) {
+    document.getElementById('action-msg').textContent = 'Error: '+e.message;
   } finally {
     btn.disabled = !bskyEnabled;
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Force Bluesky Sync';
+    btn.innerHTML = orig;
   }
 }
 
 function refreshAll() {
-  loadStats();
-  loadFollowers();
+  loadStats(); loadFollowers();
   toast('Refreshed');
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────
+// ── Init ─────────────────────────────────────────────────────────────────────
 Promise.all([loadStatus(), loadStats(), loadFollowers()])
   .catch(e => console.error('init failed', e));
 
-setInterval(loadStats, 30000);
+setInterval(loadStats,   30000);
+setInterval(updateUptime, 10000);
 
 connectLog();
 </script>

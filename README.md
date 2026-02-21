@@ -219,13 +219,15 @@ Restart klistr. You should see this log line on startup:
 |---|---|
 | Like on your post | Kind 7 reaction |
 | Repost of your post | Kind 6 repost |
-| Reply / mention | Kind 1 note (with source link) |
+| Reply to your post | Threaded Kind 1 reply (signed with a derived key for the Bluesky author), or NIP-04 DM if the parent post isn't bridged |
+| Mention / quote | NIP-04 DM notification to yourself |
 | New follower | NIP-04 DM notification to yourself |
 
 **Notes:**
 - Long Nostr posts (> 300 characters) are truncated and a link to the full post on njump.me is appended.
 - Bluesky is polled every 30 seconds for new notifications.
-- The bridge stores AT URIs in the same database table as ActivityPub IDs, so likes/reposts/deletes can be correctly linked.
+- The bridge stores AT URIs in the same database table as ActivityPub IDs, so likes/reposts/deletes and reply threading can be correctly linked.
+- Replying from Nostr to a bridged Bluesky reply will thread correctly back into the Bluesky conversation.
 
 ---
 
@@ -248,6 +250,7 @@ Restart klistr. You should see this log line on startup:
 | `BSKY_IDENTIFIER` | — | No | Bluesky handle or DID (enables Bluesky bridge) |
 | `BSKY_APP_PASSWORD` | — | No | Bluesky app password (Settings → App Passwords) |
 | `EXTERNAL_BASE_URL` | `https://njump.me` | No | Base URL for Nostr links (used in truncated Bluesky posts) |
+| `WEB_ADMIN` | — | No | Password for the web admin UI at `/web` (HTTP Basic Auth). Omit to disable entirely. |
 
 ---
 

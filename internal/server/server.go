@@ -46,6 +46,7 @@ type Server struct {
 	router        *chi.Mux
 	actorKeyStore ActorKeyStore
 	actorResolver ActorResolver
+	startedAt     time.Time
 
 	// Optional — set before Start() is called.
 	logBroadcaster *LogBroadcaster
@@ -61,6 +62,7 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 		apHandler:     apHandler,
 		actorKeyStore: actorKeyStore,
 		actorResolver: actorResolver,
+		startedAt:     time.Now(),
 	}
 	s.router = s.buildRouter()
 	return s

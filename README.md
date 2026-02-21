@@ -172,6 +172,12 @@ docker compose up -d
 
 ---
 
+## Credits
+
+Inspired by [Mostr](https://gitlab.com/soapbox-pub/mostr) by Soapbox.
+
+---
+
 ## License
 
 GNU Affero General Public License v3.0 (AGPL-3.0)

@@ -5,7 +5,9 @@
       "Bash(/home/alex/go/bin/go test:*)",
       "Bash(echo Exit: $?:*)",
       "Bash(find:*)",
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "WebFetch(domain:www.gnu.org)",
+      "Bash(curl:*)"
     ]
   }
 }

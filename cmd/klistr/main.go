@@ -13,8 +13,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -44,6 +46,27 @@ func (a *followPublisherAdapter) Publish(ctx context.Context, event *gonostr.Eve
 }
 
 func main() {
+	// Health check mode: invoked by the Docker healthcheck as "/klistr -health".
+	// Runs before config.Load() so it works even without NOSTR_PRIVATE_KEY set
+	// in the exec context. Exits 0 on HTTP 200, 1 on any error.
+	if len(os.Args) > 1 && (os.Args[1] == "-health" || os.Args[1] == "--health") {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8000"
+		}
+		resp, err := http.Get("http://localhost:" + port + "/api/healthcheck")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "unhealthy: HTTP %d\n", resp.StatusCode)
+		os.Exit(1)
+	}
+
 	// Structured JSON logging. When WEB_ADMIN is set, a LogBroadcaster wraps
 	// os.Stdout so the live log stream at /web/log/stream can fan out entries.
 	logLevel := slog.LevelInfo

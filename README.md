@@ -231,6 +231,24 @@ Restart klistr. You should see this log line on startup:
 
 ---
 
+## Web admin UI (optional)
+
+Set `WEB_ADMIN=<password>` to enable a dashboard at `https://your-domain.com/web`. It's protected by HTTP Basic Auth (any username, the password you set).
+
+### What's on the dashboard
+
+| Section | What it shows |
+|---|---|
+| **Node** | Domain, username, npub (with copy button), Bluesky status, uptime. Quick links to AP profile, Nostr profile (njump), WebFinger. |
+| **Configured Relays** | All relays from `NOSTR_RELAY`. |
+| **Bridge Activity** | Per-bridge stat panels — Nostr (relay count), Fediverse (followers, known actors, bridged objects), Bluesky (status, bridged objects, last sync time), Total. |
+| **Fediverse Followers** | List of everyone following you on the Fediverse, shown as `@user@domain`. |
+| **Import Fediverse Following** | Paste Fediverse handles (`user@domain.tld`, one per line). klistr resolves them via WebFinger, derives their Nostr pubkeys, fetches your current kind-3 from the relay to preserve existing follows, and publishes a merged kind-3 contact-list event. The bridge then sends ActivityPub Follow activities automatically. |
+| **Actions** | Force an immediate Bluesky notification poll; refresh stats. |
+| **Log** | Last 500 log lines from the ring buffer. Click **Refresh** to update. Filter by level (All / Debug / Info / Warn / Error). |
+
+---
+
 ## Configuration reference
 
 | Variable | Default | Required | Description |

@@ -162,9 +162,11 @@ docker compose up -d
 | `LOCAL_DOMAIN` | `http://localhost:8000` | **Yes** | Your public domain (HTTPS in production) |
 | `NOSTR_PRIVATE_KEY` | — | **Yes** | Your Nostr private key in hex |
 | `NOSTR_USERNAME` | first 8 chars of pubkey | No | Your handle on this bridge (e.g. `alice`) |
-| `NOSTR_RELAY` | `wss://relay.mostr.pub` | No | Primary Nostr relay |
-| `POOL_READ_RELAYS` | — | No | Extra read relays, comma-separated |
-| `POOL_WRITE_RELAYS` | — | No | Extra write relays, comma-separated |
+| `NOSTR_DISPLAY_NAME` | value of `NOSTR_USERNAME` | No | Display name shown on the Fediverse |
+| `NOSTR_SUMMARY` | — | No | Bio / profile description |
+| `NOSTR_PICTURE` | — | No | Avatar image URL |
+| `NOSTR_BANNER` | — | No | Banner/header image URL |
+| `NOSTR_RELAY` | `wss://relay.mostr.pub` | No | Nostr relays, comma-separated. First entry is used as the relay hint in event tags. |
 | `DATABASE_URL` | `klistr.db` | No | SQLite file path or `postgres://...` URL |
 | `PORT` | `8000` | No | HTTP server port |
 | `SIGN_FETCH` | `true` | No | Sign outbound HTTP requests (recommended) |

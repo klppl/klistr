@@ -78,6 +78,10 @@ func (s *Store) migrateSQLite() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS follows_follower ON follows(follower_id)`,
 		`CREATE INDEX IF NOT EXISTS follows_followed ON follows(followed_id)`,
+		`CREATE TABLE IF NOT EXISTS actor_keys (
+			pubkey       TEXT NOT NULL PRIMARY KEY,
+			ap_actor_url TEXT NOT NULL UNIQUE
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -103,6 +107,10 @@ func (s *Store) migratePostgres() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS follows_follower ON follows(follower_id)`,
 		`CREATE INDEX IF NOT EXISTS follows_followed ON follows(followed_id)`,
+		`CREATE TABLE IF NOT EXISTS actor_keys (
+			pubkey       TEXT NOT NULL PRIMARY KEY,
+			ap_actor_url TEXT NOT NULL UNIQUE
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -233,6 +241,30 @@ func (s *Store) GetFollowing(followerID string) ([]string, error) {
 		result = append(result, id)
 	}
 	return result, rows.Err()
+}
+
+// ─── Actor keys ───────────────────────────────────────────────────────────────
+
+// StoreActorKey persists a derived Nostr pubkey → AP actor URL mapping.
+func (s *Store) StoreActorKey(pubkey, apActorURL string) error {
+	var q string
+	if s.driver == "sqlite" {
+		q = `INSERT OR IGNORE INTO actor_keys (pubkey, ap_actor_url) VALUES (?, ?)`
+	} else {
+		q = `INSERT INTO actor_keys (pubkey, ap_actor_url) VALUES ($1, $2) ON CONFLICT DO NOTHING`
+	}
+	_, err := s.db.Exec(q, pubkey, apActorURL)
+	return err
+}
+
+// GetActorForKey returns the AP actor URL for a derived Nostr pubkey, if known.
+func (s *Store) GetActorForKey(pubkey string) (string, bool) {
+	var apActorURL string
+	err := s.db.QueryRow(`SELECT ap_actor_url FROM actor_keys WHERE pubkey = ?`, s.placeholder(pubkey)).Scan(&apActorURL)
+	if err != nil {
+		return "", false
+	}
+	return apActorURL, true
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

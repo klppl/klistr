@@ -7,7 +7,7 @@
 //	export NOSTR_PRIVATE_KEY=<your hex private key>
 //	export NOSTR_USERNAME=alice
 //	export LOCAL_DOMAIN=https://yourdomain.com
-//	export NOSTR_RELAY=wss://relay.mostr.pub
+//	export NOSTR_RELAY=wss://relay.mostr.pub,wss://relay.damus.io
 //	./klistr
 package main
 
@@ -41,7 +41,7 @@ func main() {
 	cfg := config.Load()
 	slog.Info("config loaded",
 		"domain", cfg.LocalDomain,
-		"relay", cfg.NostrRelay,
+		"relays", cfg.NostrRelays,
 		"database", cfg.DatabaseURL,
 		"username", cfg.NostrUsername,
 		"pubkey", cfg.NostrPublicKey[:8],
@@ -72,11 +72,7 @@ func main() {
 	signer := nostrpkg.NewSigner(cfg.NostrPrivateKey, cfg.NostrPublicKey)
 
 	// ─── Nostr Publisher ──────────────────────────────────────────────────────
-	writeRelays := cfg.WriteRelays
-	if cfg.NostrRelay != "" {
-		writeRelays = append(writeRelays, cfg.NostrRelay)
-	}
-	publisher := nostrpkg.NewPublisher(writeRelays)
+	publisher := nostrpkg.NewPublisher(cfg.NostrRelays)
 
 	// ─── AP Transmute Context ─────────────────────────────────────────────────
 	localActorURL := cfg.BaseURL("/users/" + cfg.NostrUsername)
@@ -108,13 +104,14 @@ func main() {
 		Publisher:     publisher,
 		Store:         store,
 		Federator:     federator,
-		NostrRelay:    cfg.NostrRelay,
+		NostrRelay:    cfg.PrimaryRelay(),
 	}
 
 	// ─── Nostr Handler (incoming Nostr → ActivityPub) ─────────────────────────
 	nostrHandler := &nostrpkg.Handler{
 		TC:        tc,
 		Federator: federator,
+		Store:     store,
 	}
 
 	// ─── Graceful shutdown ────────────────────────────────────────────────────
@@ -123,15 +120,11 @@ func main() {
 	defer cancel()
 
 	// ─── Start relay subscription ─────────────────────────────────────────────
-	readRelays := cfg.ReadRelays
-	if cfg.NostrRelay != "" {
-		readRelays = append(readRelays, cfg.NostrRelay)
-	}
-	pool := nostrpkg.NewRelayPool(readRelays, writeRelays, cfg.NostrPublicKey, nostrHandler.Handle)
+	pool := nostrpkg.NewRelayPool(cfg.NostrRelays, cfg.NostrRelays, cfg.NostrPublicKey, nostrHandler.Handle)
 	go pool.Start(ctx)
 
 	// ─── Start HTTP server ────────────────────────────────────────────────────
-	srv := server.New(cfg, store, keyPair, apHandler)
+	srv := server.New(cfg, store, keyPair, apHandler, store, signer)
 	srv.Start(ctx) // blocks until ctx is cancelled
 
 	slog.Info("klistr bridge stopped")

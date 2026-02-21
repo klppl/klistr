@@ -8,17 +8,21 @@ import (
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
 	LocalDomain       string
-	NostrRelay        string
+	NostrRelays       []string // all relays; first is used as the hint relay in event tags
 	NostrPrivateKey   string
 	NostrPublicKey    string
+	NostrNpub         string
 	NostrUsername     string
-	ReadRelays        []string
-	WriteRelays       []string
+	NostrDisplayName  string
+	NostrSummary      string
+	NostrPicture      string
+	NostrBanner       string
 	DatabaseURL       string
 	RSAPrivateKeyPath string
 	RSAPublicKeyPath  string
@@ -27,6 +31,14 @@ type Config struct {
 	ZapPubkey         string
 	ZapSplit          float64
 	Port              string
+}
+
+// PrimaryRelay returns the first configured relay, used as the hint relay in event tags.
+func (c *Config) PrimaryRelay() string {
+	if len(c.NostrRelays) > 0 {
+		return c.NostrRelays[0]
+	}
+	return ""
 }
 
 // Load reads configuration from environment variables.
@@ -50,14 +62,32 @@ func Load() *Config {
 		username = pubKey[:8]
 	}
 
+	npub, err := nip19.EncodePublicKey(pubKey)
+	if err != nil {
+		npub = pubKey // fallback to hex if encoding fails
+	}
+
+	displayName := os.Getenv("NOSTR_DISPLAY_NAME")
+	if displayName == "" {
+		displayName = username
+	}
+
+	nostrRelays := parseRelays(os.Getenv("NOSTR_RELAY"))
+	if len(nostrRelays) == 0 {
+		nostrRelays = []string{"wss://relay.mostr.pub"}
+	}
+
 	return &Config{
 		LocalDomain:       getEnv("LOCAL_DOMAIN", "http://localhost:8000"),
-		NostrRelay:        getEnv("NOSTR_RELAY", "wss://relay.mostr.pub"),
+		NostrRelays:       nostrRelays,
 		NostrPrivateKey:   privKey,
 		NostrPublicKey:    pubKey,
+		NostrNpub:         npub,
 		NostrUsername:     username,
-		ReadRelays:        parseRelays(os.Getenv("POOL_READ_RELAYS")),
-		WriteRelays:       parseRelays(os.Getenv("POOL_WRITE_RELAYS")),
+		NostrDisplayName:  displayName,
+		NostrSummary:      os.Getenv("NOSTR_SUMMARY"),
+		NostrPicture:      os.Getenv("NOSTR_PICTURE"),
+		NostrBanner:       os.Getenv("NOSTR_BANNER"),
 		DatabaseURL:       getEnv("DATABASE_URL", "klistr.db"),
 		RSAPrivateKeyPath: getEnv("RSA_PRIVATE_KEY_PATH", "private.pem"),
 		RSAPublicKeyPath:  getEnv("RSA_PUBLIC_KEY_PATH", "public.pem"),

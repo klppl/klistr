@@ -70,6 +70,54 @@ func InvalidateCache(rawURL string) {
 	objectCache.Delete(rawURL)
 }
 
+// WebFingerResolve resolves a Fediverse handle (e.g. "alice@mastodon.social")
+// to an AP actor URL via WebFinger. Returns the actor URL or an error.
+func WebFingerResolve(ctx context.Context, handle string) (string, error) {
+	parts := strings.SplitN(handle, "@", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid handle %q: expected user@domain", handle)
+	}
+	domain := parts[1]
+
+	wfURL := "https://" + domain + "/.well-known/webfinger?resource=acct:" + handle
+
+	req, err := http.NewRequestWithContext(ctx, "GET", wfURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("webfinger request: %w", err)
+	}
+	req.Header.Set("Accept", "application/jrd+json, application/json")
+	req.Header.Set("User-Agent", "klistr/1.0 (https://github.com/klppl/klistr)")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("webfinger fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("webfinger returned HTTP %d for %s", resp.StatusCode, handle)
+	}
+
+	var wf struct {
+		Links []struct {
+			Rel  string `json:"rel"`
+			Type string `json:"type"`
+			Href string `json:"href"`
+		} `json:"links"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wf); err != nil {
+		return "", fmt.Errorf("webfinger decode: %w", err)
+	}
+
+	for _, link := range wf.Links {
+		if link.Rel == "self" && (link.Type == "application/activity+json" ||
+			link.Type == `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`) {
+			return link.Href, nil
+		}
+	}
+	return "", fmt.Errorf("no ActivityPub actor link found for %s", handle)
+}
+
 // DeliverActivity sends an ActivityPub activity to a remote inbox using HTTP signatures.
 func DeliverActivity(ctx context.Context, inbox string, activity map[string]interface{}, keyID string, privKey *rsa.PrivateKey) error {
 	body, err := json.Marshal(activity)

@@ -8,11 +8,21 @@ import (
 	"github.com/klppl/klistr/internal/ap"
 )
 
+// FollowStore is the subset of db.Store used by the kind-3 handler.
+type FollowStore interface {
+	AddFollow(followerID, followedID string) error
+	RemoveFollow(followerID, followedID string) error
+	GetFollowing(followerID string) ([]string, error)
+	GetActorForKey(pubkey string) (string, bool)
+}
+
 // Handler processes incoming Nostr events from the relay subscription
 // and federates them to ActivityPub servers.
 type Handler struct {
 	TC        *ap.TransmuteContext
 	Federator *ap.Federator
+	// Store enables kind-3 AP follow bridging (optional).
+	Store FollowStore
 }
 
 // Handle processes a single Nostr event.
@@ -38,6 +48,8 @@ func (h *Handler) Handle(ctx context.Context, event *nostr.Event) {
 		h.handleKind0(ctx, event)
 	case 1:
 		h.handleKind1(ctx, event)
+	case 3:
+		h.handleKind3(ctx, event)
 	case 5:
 		h.handleKind5(ctx, event)
 	case 6:
@@ -103,6 +115,74 @@ func (h *Handler) handleKind9735(ctx context.Context, event *nostr.Event) {
 	// Zaps: currently logged but not fully federated.
 	slog.Debug("received zap event", "id", event.ID)
 	// TODO: Federate zap as AP Note/Announce
+}
+
+func (h *Handler) handleKind3(ctx context.Context, event *nostr.Event) {
+	if h.Store == nil {
+		return
+	}
+
+	localActorURL := h.TC.LocalActorURL
+
+	// Build the set of Nostr pubkeys in the new contact list.
+	newPubkeys := make(map[string]struct{})
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "p" {
+			newPubkeys[tag[1]] = struct{}{}
+		}
+	}
+
+	// Resolve each pubkey to an AP actor URL via their kind-0 proxy tag.
+	newAPFollows := make(map[string]struct{})
+	for pubkey := range newPubkeys {
+		if apURL := h.resolveAPActor(ctx, pubkey); apURL != "" {
+			newAPFollows[apURL] = struct{}{}
+		}
+	}
+
+	// Get the AP actors we were already following.
+	current, err := h.Store.GetFollowing(localActorURL)
+	if err != nil {
+		slog.Warn("kind3: failed to load current AP follows", "error", err)
+		return
+	}
+	currentSet := make(map[string]struct{}, len(current))
+	for _, apURL := range current {
+		currentSet[apURL] = struct{}{}
+	}
+
+	// Send Follow for newly added AP actors.
+	for apURL := range newAPFollows {
+		if _, already := currentSet[apURL]; already {
+			continue
+		}
+		slog.Info("kind3: following AP actor", "actor", apURL)
+		follow := ap.BuildFollow(localActorURL, apURL)
+		go h.Federator.Federate(ctx, follow)
+		if err := h.Store.AddFollow(localActorURL, apURL); err != nil {
+			slog.Warn("kind3: failed to store follow", "actor", apURL, "error", err)
+		}
+	}
+
+	// Send Undo Follow for AP actors no longer in the contact list.
+	for apURL := range currentSet {
+		if _, still := newAPFollows[apURL]; still {
+			continue
+		}
+		slog.Info("kind3: unfollowing AP actor", "actor", apURL)
+		undo := ap.BuildUndoFollow(localActorURL, apURL)
+		go h.Federator.Federate(ctx, undo)
+		if err := h.Store.RemoveFollow(localActorURL, apURL); err != nil {
+			slog.Warn("kind3: failed to remove follow", "actor", apURL, "error", err)
+		}
+	}
+}
+
+// resolveAPActor returns the ActivityPub actor URL for a Nostr pubkey,
+// using the mapping stored during NIP-05 lookups.
+func (h *Handler) resolveAPActor(ctx context.Context, pubkey string) string {
+	apURL, _ := h.Store.GetActorForKey(pubkey)
+	return apURL
 }
 
 // ─── Eligibility check ────────────────────────────────────────────────────────

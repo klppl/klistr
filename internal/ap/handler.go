@@ -95,7 +95,7 @@ func (h *APHandler) handleFollow(ctx context.Context, activity IncomingActivity)
 		"type":   "Follow",
 		"actor":  activity.Actor,
 		"object": followedID,
-	}, followedID)
+	}, followedID, activity.Actor)
 
 	go h.Federator.Federate(ctx, accept)
 	return nil

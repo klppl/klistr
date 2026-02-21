@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // TransmuteContext provides dependencies for Nostr→AP conversion.
@@ -320,17 +321,31 @@ func BuildFollow(followerID, followedID string) map[string]interface{} {
 		"type":     "Follow",
 		"actor":    followerID,
 		"object":   followedID,
+		"to":       []string{followedID},
+	}
+}
+
+// BuildUndoFollow creates an AP Undo(Follow) activity.
+func BuildUndoFollow(followerID, followedID string) map[string]interface{} {
+	return map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       followerID + "#unfollow-" + fmt.Sprintf("%d", time.Now().Unix()),
+		"type":     "Undo",
+		"actor":    followerID,
+		"object":   BuildFollow(followerID, followedID),
+		"to":       []string{followedID},
 	}
 }
 
 // BuildAccept creates an AP Accept activity for a Follow.
-func BuildAccept(followActivity map[string]interface{}, localActorID string) map[string]interface{} {
+func BuildAccept(followActivity map[string]interface{}, localActorID string, followerID string) map[string]interface{} {
 	return map[string]interface{}{
 		"@context": DefaultContext,
 		"id":       localActorID + "#accept-" + fmt.Sprintf("%d", time.Now().Unix()),
 		"type":     "Accept",
 		"actor":    localActorID,
 		"object":   followActivity,
+		"to":       []string{followerID},
 	}
 }
 
@@ -530,17 +545,25 @@ func parseImeta(entries []string) *Attachment {
 }
 
 func toNpubProxy(event *nostr.Event) Proxy {
+	npub, err := nip19.EncodePublicKey(event.PubKey)
+	if err != nil {
+		npub = event.PubKey
+	}
 	return Proxy{
 		Protocol:      NostrProtocolURI,
-		Proxied:       "npub1" + event.PubKey[:8], // simplified; would use nip19 encoding
+		Proxied:       npub,
 		Authoritative: true,
 	}
 }
 
 func toNoteProxy(event *nostr.Event) Proxy {
+	note, err := nip19.EncodeNote(event.ID)
+	if err != nil {
+		note = event.ID
+	}
 	return Proxy{
 		Protocol:      NostrProtocolURI,
-		Proxied:       "note1" + event.ID[:8], // simplified
+		Proxied:       note,
 		Authoritative: true,
 	}
 }

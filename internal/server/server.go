@@ -26,22 +26,37 @@ const (
 	version          = "1.0.0"
 )
 
+// ActorKeyStore persists derived pubkey ↔ AP actor URL mappings.
+type ActorKeyStore interface {
+	StoreActorKey(pubkey, apActorURL string) error
+	GetActorForKey(pubkey string) (string, bool)
+}
+
+// ActorResolver derives a Nostr pubkey for a given AP actor URL.
+type ActorResolver interface {
+	PublicKey(apActorURL string) (string, error)
+}
+
 // Server is the main HTTP server for klistr.
 type Server struct {
-	cfg       *config.Config
-	store     *db.Store
-	keyPair   *ap.KeyPair
-	apHandler *ap.APHandler
-	router    *chi.Mux
+	cfg           *config.Config
+	store         *db.Store
+	keyPair       *ap.KeyPair
+	apHandler     *ap.APHandler
+	router        *chi.Mux
+	actorKeyStore ActorKeyStore
+	actorResolver ActorResolver
 }
 
 // New creates a new Server.
-func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap.APHandler) *Server {
+func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap.APHandler, actorKeyStore ActorKeyStore, actorResolver ActorResolver) *Server {
 	s := &Server{
-		cfg:       cfg,
-		store:     store,
-		keyPair:   keyPair,
-		apHandler: apHandler,
+		cfg:           cfg,
+		store:         store,
+		keyPair:       keyPair,
+		apHandler:     apHandler,
+		actorKeyStore: actorKeyStore,
+		actorResolver: actorResolver,
 	}
 	s.router = s.buildRouter()
 	return s
@@ -140,7 +155,8 @@ func (s *Server) handleActor(w http.ResponseWriter, r *http.Request) {
 		ID:                actorURL,
 		Type:              "Person",
 		PreferredUsername: username,
-		Name:              username,
+		Name:              s.cfg.NostrDisplayName,
+		Summary:           s.cfg.NostrSummary,
 		Inbox:             actorURL + "/inbox",
 		Outbox:            actorURL + "/outbox",
 		Followers:         actorURL + "/followers",
@@ -155,9 +171,15 @@ func (s *Server) handleActor(w http.ResponseWriter, r *http.Request) {
 		},
 		ProxyOf: []ap.Proxy{{
 			Protocol:      ap.NostrProtocolURI,
-			Proxied:       s.cfg.NostrPublicKey,
+			Proxied:       s.cfg.NostrNpub,
 			Authoritative: true,
 		}},
+	}
+	if s.cfg.NostrPicture != "" {
+		actor.Icon = &ap.Image{Type: "Image", URL: s.cfg.NostrPicture}
+	}
+	if s.cfg.NostrBanner != "" {
+		actor.Image = &ap.Image{Type: "Image", URL: s.cfg.NostrBanner}
 	}
 
 	apResponse(w, ap.WithContext(actor))
@@ -349,18 +371,75 @@ func (s *Server) handleWebFinger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNIP05(w http.ResponseWriter, r *http.Request) {
-	// NIP-05 lookup: /.well-known/nostr.json?name=alice
 	name := r.URL.Query().Get("name")
-	if name == "" || name != s.cfg.NostrUsername {
+	if name == "" {
 		jsonResponse(w, map[string]interface{}{"names": map[string]string{}}, http.StatusOK)
 		return
 	}
 
-	jsonResponse(w, map[string]interface{}{
-		"names": map[string]string{
-			s.cfg.NostrUsername: s.cfg.NostrPublicKey,
-		},
-	}, http.StatusOK)
+	// Local user.
+	if name == s.cfg.NostrUsername {
+		jsonResponse(w, map[string]interface{}{
+			"names": map[string]string{s.cfg.NostrUsername: s.cfg.NostrPublicKey},
+		}, http.StatusOK)
+		return
+	}
+
+	// Fediverse handle lookup: "alice_at_mastodon.social" → "alice@mastodon.social"
+	if s.actorKeyStore != nil && s.actorResolver != nil {
+		if pubkey, ok := s.resolveRemoteHandle(r.Context(), name); ok {
+			jsonResponse(w, map[string]interface{}{
+				"names": map[string]string{name: pubkey},
+			}, http.StatusOK)
+			return
+		}
+	}
+
+	jsonResponse(w, map[string]interface{}{"names": map[string]string{}}, http.StatusOK)
+}
+
+// resolveRemoteHandle converts a name like "alice_at_mastodon.social" into a
+// Fediverse handle, resolves it via WebFinger, and returns the derived Nostr pubkey.
+func (s *Server) resolveRemoteHandle(ctx context.Context, name string) (string, bool) {
+	handle := remoteHandleToFediverse(name)
+	if handle == "" {
+		return "", false
+	}
+
+	actorURL, err := ap.WebFingerResolve(ctx, handle)
+	if err != nil {
+		slog.Debug("NIP-05: WebFinger failed", "handle", handle, "error", err)
+		return "", false
+	}
+
+	pubkey, err := s.actorResolver.PublicKey(actorURL)
+	if err != nil {
+		slog.Warn("NIP-05: failed to derive pubkey", "actor", actorURL, "error", err)
+		return "", false
+	}
+
+	if err := s.actorKeyStore.StoreActorKey(pubkey, actorURL); err != nil {
+		slog.Warn("NIP-05: failed to store actor key", "error", err)
+	}
+
+	slog.Info("NIP-05: resolved remote handle", "name", name, "handle", handle, "actor", actorURL, "pubkey", pubkey[:8])
+	return pubkey, true
+}
+
+// remoteHandleToFediverse converts "alice_at_mastodon.social" → "alice@mastodon.social".
+// Returns "" if the name doesn't match the expected pattern.
+func remoteHandleToFediverse(name string) string {
+	const sep = "_at_"
+	idx := strings.Index(name, sep)
+	if idx <= 0 {
+		return ""
+	}
+	user := name[:idx]
+	domain := name[idx+len(sep):]
+	if user == "" || domain == "" || !strings.Contains(domain, ".") {
+		return ""
+	}
+	return user + "@" + domain
 }
 
 func (s *Server) handleHostMeta(w http.ResponseWriter, r *http.Request) {

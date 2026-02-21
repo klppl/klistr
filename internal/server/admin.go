@@ -3,8 +3,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"strings"
-	"time"
 
 	"log/slog"
 )
@@ -112,61 +110,18 @@ func (s *Server) handleAdminSyncBsky(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleAdminLogStream(w http.ResponseWriter, r *http.Request) {
+// handleAdminLogSnapshot returns the current ring-buffer contents as a JSON
+// array of raw log lines. The client refreshes on demand instead of streaming.
+func (s *Server) handleAdminLogSnapshot(w http.ResponseWriter, r *http.Request) {
 	if s.logBroadcaster == nil {
-		http.Error(w, "log streaming not available", http.StatusServiceUnavailable)
+		jsonResponse(w, []string{}, http.StatusOK)
 		return
 	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
+	lines := s.logBroadcaster.Lines()
+	if lines == nil {
+		lines = []string{}
 	}
-
-	// Disable the server write deadline for this long-lived SSE connection.
-	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-		slog.Debug("admin log stream: could not clear write deadline", "error", err)
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
-
-	history, ch, cancel := s.logBroadcaster.Subscribe()
-	defer cancel()
-
-	// Send ring-buffer history so the client sees recent context immediately.
-	for _, line := range history {
-		fmt.Fprintf(w, "data: %s\n\n", jsonEscapeSSE(line))
-	}
-	flusher.Flush()
-
-	keepalive := time.NewTicker(20 * time.Second)
-	defer keepalive.Stop()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-keepalive.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
-			flusher.Flush()
-		case line, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", jsonEscapeSSE(line))
-			flusher.Flush()
-		}
-	}
-}
-
-// jsonEscapeSSE ensures newlines inside JSON don't break the SSE framing.
-func jsonEscapeSSE(s string) string {
-	return strings.ReplaceAll(s, "\n", " ")
+	jsonResponse(w, lines, http.StatusOK)
 }
 
 // ─── HTML template ────────────────────────────────────────────────────────────
@@ -280,17 +235,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .lfb[data-level=ERROR].active{border-color:var(--red);color:var(--red)}
 .lfb[data-level=DEBUG].active{border-color:var(--purple);color:var(--purple)}
 .log-sep{width:1px;height:18px;background:var(--border);margin:0 2px}
-.log-wrap{position:relative}
 #log{background:#010409;border:1px solid var(--border);border-radius:6px;height:440px;overflow-y:auto;padding:10px 14px;font-family:'JetBrains Mono','Fira Code','SF Mono',Consolas,monospace;font-size:12px;line-height:1.65;scroll-behavior:smooth}
 .ll{white-space:pre-wrap;word-break:break-all}
 .ll.INFO{color:#c9d1d9}
 .ll.DEBUG{color:#484f58}
 .ll.WARN{color:var(--yellow)}
 .ll.ERROR{color:var(--red)}
-.log-indicator{position:absolute;top:-8px;right:8px;font-size:11px;padding:1px 8px;border-radius:10px;background:var(--surface);border:1px solid var(--border)}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;background:var(--muted)}
-.dot.live{background:var(--green);animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .3s;z-index:999}
@@ -389,7 +339,27 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="followers-list" id="followers-list"><span class="empty">loading…</span></div>
 </div>
 
-<!-- Row 4: Actions -->
+<!-- Row 4: Import Following -->
+<div class="card-full">
+  <h2>Import Fediverse Following</h2>
+  <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
+    Paste Fediverse handles (one per line). klistr will resolve them via WebFinger, derive their Nostr pubkeys, and publish an updated kind-3 contact list — merged with your existing follows.
+  </p>
+  <textarea id="import-textarea"
+    placeholder="alice@mastodon.social&#10;bob@hachyderm.io&#10;carol@fosstodon.org"
+    style="width:100%;height:110px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:'SF Mono',Consolas,monospace;font-size:12px;resize:vertical;line-height:1.6"
+  ></textarea>
+  <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+    <button class="btn btn-blue" id="btn-import" onclick="importFollowing()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+      Import &amp; Publish Kind-3
+    </button>
+    <span style="font-size:12px;color:var(--muted)" id="import-status"></span>
+  </div>
+  <div id="import-results" style="margin-top:14px"></div>
+</div>
+
+<!-- Row 5: Actions -->
 <div class="card-full">
   <h2>Actions</h2>
   <div class="actions">
@@ -405,9 +375,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="action-msg" id="action-msg"></div>
 </div>
 
-<!-- Row 5: Live Log -->
+<!-- Row 6: Log -->
 <div class="card-full">
-  <h2>Live Log</h2>
+  <h2>Log</h2>
   <div class="log-toolbar">
     <button class="lfb active" data-level="ALL"   onclick="setLogFilter('ALL')">All</button>
     <button class="lfb"        data-level="DEBUG"  onclick="setLogFilter('DEBUG')">Debug</button>
@@ -415,23 +385,23 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <button class="lfb"        data-level="WARN"   onclick="setLogFilter('WARN')">Warn</button>
     <button class="lfb"        data-level="ERROR"  onclick="setLogFilter('ERROR')">Error</button>
     <div class="log-sep"></div>
+    <button class="btn btn-surface" style="padding:4px 12px;font-size:11px" id="btn-refresh-log" onclick="refreshLog()">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Refresh
+    </button>
     <button class="btn btn-red" style="padding:4px 12px;font-size:11px" onclick="clearLog()">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
       Clear
     </button>
+    <span style="font-size:11px;color:var(--muted);margin-left:4px" id="log-ts"></span>
   </div>
-  <div class="log-wrap">
-    <div class="log-indicator"><span class="dot" id="dot"></span><span id="log-status">connecting</span></div>
-    <div id="log"></div>
-  </div>
+  <div id="log"></div>
 </div>
 
 </div><!-- /layout -->
 <div class="toast" id="toast"></div>
 
 <script>
-const MAX_LINES = 600;
-let lineCount = 0;
 let autoScroll = true;
 let bskyEnabled = false;
 let startedAt = 0;
@@ -495,7 +465,7 @@ logEl.addEventListener('scroll', () => {
   autoScroll = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
 });
 
-function appendLog(raw) {
+function renderLine(raw) {
   const div = document.createElement('div');
   div.className = 'll';
   let lvl = 'INFO';
@@ -511,14 +481,10 @@ function appendLog(raw) {
       .join('  ');
     div.textContent = [ts, lvl.padEnd(5), msg, extras].filter(Boolean).join('  ');
   } catch { div.textContent = raw; }
-
   if (activeFilter !== 'ALL' && levelOrder[lvl] < levelOrder[activeFilter]) {
     div.style.display = 'none';
   }
-  logEl.appendChild(div);
-  lineCount++;
-  if (lineCount > MAX_LINES) { logEl.removeChild(logEl.firstChild); lineCount--; }
-  if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
+  return div;
 }
 
 function setLogFilter(level) {
@@ -532,21 +498,26 @@ function setLogFilter(level) {
 
 function clearLog() {
   logEl.innerHTML = '';
-  lineCount = 0;
+  document.getElementById('log-ts').textContent = '';
   toast('Log cleared');
 }
 
-// ── SSE log stream ───────────────────────────────────────────────────────────
-function connectLog() {
-  const dot = document.getElementById('dot');
-  const status = document.getElementById('log-status');
-  const src = new EventSource('/web/log/stream', {withCredentials: true});
-  src.onopen = () => { dot.className = 'dot live'; status.textContent = 'live'; };
-  src.onmessage = e => appendLog(e.data);
-  src.onerror = () => {
-    dot.className = 'dot'; status.textContent = 'reconnecting…';
-    src.close(); setTimeout(connectLog, 5000);
-  };
+async function refreshLog() {
+  const btn = document.getElementById('btn-refresh-log');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/web/api/log');
+    const lines = await r.json();
+    logEl.innerHTML = '';
+    (lines||[]).forEach(raw => logEl.appendChild(renderLine(raw)));
+    document.getElementById('log-ts').textContent =
+      'Last refreshed ' + new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
+  } catch(e) {
+    toast('Log fetch failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
@@ -672,14 +643,83 @@ function refreshAll() {
   toast('Refreshed');
 }
 
+// ── Import Following ─────────────────────────────────────────────────────────
+async function importFollowing() {
+  const raw = document.getElementById('import-textarea').value;
+  const handles = raw.split('\n').map(h => h.trim()).filter(Boolean);
+  if (!handles.length) { toast('No handles entered'); return; }
+
+  const btn    = document.getElementById('btn-import');
+  const status = document.getElementById('import-status');
+  btn.disabled = true;
+  const origHTML = btn.innerHTML;
+  btn.textContent = 'Resolving…';
+  status.textContent = 'Fetching existing follows from relay, this may take up to 8s…';
+
+  try {
+    const r = await fetch('/web/api/import-following', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({handles}),
+    });
+    const d = await r.json();
+
+    // Status line
+    const ok  = (d.results||[]).filter(r => r.status==='ok').length;
+    const err = (d.results||[]).filter(r => r.status==='error').length;
+    let msg = ok + ' resolved';
+    if (err) msg += ', ' + err + ' failed';
+    if (d.published) msg += ' — kind-3 published (' + d.total_follows + ' total follows)';
+    else if (d.error) msg += ' — ' + d.error;
+    if (!d.fetched_existing) msg += ' ⚠ no existing kind-3 found on relay';
+    status.textContent = msg;
+
+    // Result table
+    const el = document.getElementById('import-results');
+    if (!d.results || d.results.length === 0) { el.innerHTML = ''; return; }
+
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px">'
+      + '<thead><tr style="color:var(--muted);text-align:left">'
+      + '<th style="padding:5px 8px;border-bottom:1px solid var(--border)">Handle</th>'
+      + '<th style="padding:5px 8px;border-bottom:1px solid var(--border)">Status</th>'
+      + '<th style="padding:5px 8px;border-bottom:1px solid var(--border)">Npub / Error</th>'
+      + '</tr></thead><tbody>';
+
+    (d.results||[]).forEach(r => {
+      const isOk = r.status === 'ok';
+      const statusCell = isOk
+        ? '<span style="color:var(--green);font-weight:600">✓ ok</span>'
+        : '<span style="color:var(--red);font-weight:600">✗ error</span>';
+      const detail = isOk
+        ? '<span style="font-family:monospace;color:var(--muted)">' + esc(r.npub||'') + '</span>'
+        : '<span style="color:var(--red)">' + esc(r.error||'') + '</span>';
+      html += '<tr style="border-bottom:1px solid var(--border)">'
+        + '<td style="padding:5px 8px;font-family:monospace">' + esc(r.handle) + '</td>'
+        + '<td style="padding:5px 8px">' + statusCell + '</td>'
+        + '<td style="padding:5px 8px">' + detail + '</td>'
+        + '</tr>';
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+
+    if (d.published) { toast('Kind-3 published — ' + ok + ' new follows added'); loadFollowers(); }
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHTML;
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 Promise.all([loadStatus(), loadStats(), loadFollowers()])
   .catch(e => console.error('init failed', e));
 
-setInterval(loadStats,   30000);
+setInterval(loadStats,    30000);
 setInterval(updateUptime, 10000);
 
-connectLog();
+// Load log on first visit.
+refreshLog();
 </script>
 </body>
 </html>`

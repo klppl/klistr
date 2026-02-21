@@ -46,6 +46,15 @@ func (lb *LogBroadcaster) Write(p []byte) (int, error) {
 	return lb.out.Write(p)
 }
 
+// Lines returns a snapshot of the current ring buffer. No subscription is created.
+func (lb *LogBroadcaster) Lines() []string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	out := make([]string, len(lb.buf))
+	copy(out, lb.buf)
+	return out
+}
+
 // Subscribe returns a snapshot of recent log lines, a channel for new lines,
 // and a cancel func that must be called when the subscriber is done.
 func (lb *LogBroadcaster) Subscribe() (history []string, ch <-chan string, cancel func()) {

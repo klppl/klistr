@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/klppl/klistr/internal/ap"
 	"github.com/klppl/klistr/internal/bsky"
 	"github.com/klppl/klistr/internal/config"
@@ -27,6 +28,20 @@ import (
 	nostrpkg "github.com/klppl/klistr/internal/nostr"
 	"github.com/klppl/klistr/internal/server"
 )
+
+// followPublisherAdapter satisfies server.FollowPublisher by delegating to
+// the Nostr Signer (for signing) and Publisher (for relay delivery).
+type followPublisherAdapter struct {
+	signer    *nostrpkg.Signer
+	publisher *nostrpkg.Publisher
+}
+
+func (a *followPublisherAdapter) SignAsUser(event *gonostr.Event) error {
+	return a.signer.SignAsUser(event)
+}
+func (a *followPublisherAdapter) Publish(ctx context.Context, event *gonostr.Event) error {
+	return a.publisher.Publish(ctx, event)
+}
 
 func main() {
 	// Structured JSON logging. When WEB_ADMIN is set, a LogBroadcaster wraps
@@ -169,6 +184,7 @@ func main() {
 	if bskyTrigger != nil {
 		srv.SetBskyTrigger(bskyTrigger)
 	}
+	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})
 	srv.Start(ctx) // blocks until ctx is cancelled
 
 	slog.Info("klistr bridge stopped")

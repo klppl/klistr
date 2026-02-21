@@ -49,8 +49,9 @@ type Server struct {
 	startedAt     time.Time
 
 	// Optional — set before Start() is called.
-	logBroadcaster *LogBroadcaster
-	bskyTrigger    chan struct{}
+	logBroadcaster  *LogBroadcaster
+	bskyTrigger     chan struct{}
+	followPublisher FollowPublisher
 }
 
 // New creates a new Server.
@@ -74,6 +75,9 @@ func (s *Server) SetLogBroadcaster(lb *LogBroadcaster) { s.logBroadcaster = lb }
 // SetBskyTrigger attaches a channel that, when sent to, triggers an immediate
 // Bluesky poll. Nil disables the Force Sync button.
 func (s *Server) SetBskyTrigger(ch chan struct{}) { s.bskyTrigger = ch }
+
+// SetFollowPublisher attaches the follow publisher used by the import endpoint.
+func (s *Server) SetFollowPublisher(fp FollowPublisher) { s.followPublisher = fp }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -156,11 +160,12 @@ func (s *Server) buildRouter() *chi.Mux {
 		r.Route("/web", func(r chi.Router) {
 			r.Use(s.adminAuth)
 			r.Get("/", s.handleAdminDashboard)
-			r.Get("/log/stream", s.handleAdminLogStream)
+			r.Get("/api/log", s.handleAdminLogSnapshot)
 			r.Get("/api/status", s.handleAdminStatus)
 			r.Get("/api/stats", s.handleAdminStats)
 			r.Get("/api/followers", s.handleAdminFollowers)
 			r.Post("/api/sync-bsky", s.handleAdminSyncBsky)
+			r.Post("/api/import-following", s.handleImportFollowing)
 		})
 	}
 

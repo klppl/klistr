@@ -16,7 +16,8 @@
       "Bash(grep:*)",
       "Bash(wc:*)",
       "WebFetch(domain:docs.bsky.app)",
-      "Bash(go vet:*)"
+      "Bash(go vet:*)",
+      "Bash(echo exit:$?:*)"
     ]
   }
 }

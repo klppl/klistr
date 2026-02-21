@@ -1,7 +1,28 @@
 // Package ap implements the ActivityPub protocol for the klistr bridge.
 package ap
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// StringOrArray deserialises an AP field that may be either a JSON string
+// or a JSON array of strings (both are valid per the AP spec).
+type StringOrArray []string
+
+func (s *StringOrArray) UnmarshalJSON(data []byte) error {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		*s = arr
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		*s = []string{str}
+		return nil
+	}
+	return fmt.Errorf("cannot unmarshal %s into string or []string", data)
+}
 
 const (
 	PublicURI          = "https://www.w3.org/ns/activitystreams#Public"
@@ -164,8 +185,8 @@ type IncomingActivity struct {
 	Type      string          `json:"type"`
 	Actor     string          `json:"actor"`
 	Object    json.RawMessage `json:"object"`
-	To        []string        `json:"to,omitempty"`
-	CC        []string        `json:"cc,omitempty"`
+	To        StringOrArray   `json:"to,omitempty"`
+	CC        StringOrArray   `json:"cc,omitempty"`
 	Published string          `json:"published,omitempty"`
 	Content   string          `json:"content,omitempty"`
 }

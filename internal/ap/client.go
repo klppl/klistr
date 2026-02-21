@@ -132,6 +132,7 @@ func DeliverActivity(ctx context.Context, inbox string, activity map[string]inte
 	req.Header.Set("Content-Type", "application/activity+json")
 	req.Header.Set("User-Agent", "klistr/1.0 (https://github.com/klppl/klistr)")
 	req.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+	req.Header.Set("Host", req.URL.Host)
 
 	// Sign the request.
 	signer, _, err := httpsig.NewSigner(

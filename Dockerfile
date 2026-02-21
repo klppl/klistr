@@ -1,31 +1,35 @@
 # ─── Build stage ──────────────────────────────────────────────────────────────
-FROM golang:1.23-alpine AS builder
+# $BUILDPLATFORM is always the runner's native platform (amd64).
+# Go cross-compiles to $TARGETARCH, so no QEMU emulation is needed.
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
 
-# Add certificates for HTTPS
-RUN apk add --no-cache ca-certificates git
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 
-# Copy dependency files first for better layer caching
 COPY go.mod go.sum ./
-RUN go mod download
 
-# Copy source
+# Module cache persists across builds — no re-downloading on unchanged dependencies.
+RUN --mount=type=cache,target=/root/go/pkg/mod \
+    go mod download
+
 COPY . .
 
-# Build a static binary (no CGO needed thanks to modernc.org/sqlite)
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o klistr ./cmd/klistr
+# Build cache persists across builds — only changed packages are recompiled.
+RUN --mount=type=cache,target=/root/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -ldflags="-w -s" -o klistr ./cmd/klistr
 
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM scratch
 
-# Copy CA certificates for HTTPS
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-# Copy the binary
 COPY --from=builder /app/klistr /klistr
 
-# Data directory for SQLite db and RSA keys
 VOLUME /data
 WORKDIR /data
 

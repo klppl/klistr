@@ -216,6 +216,10 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		}
 	}
 
+	// Publish a kind-0 for the Bluesky author so Nostr clients can resolve
+	// their profile and link back to the original Bluesky account.
+	p.publishBskyAuthorProfile(ctx, n)
+
 	content := extractNotifText(n)
 	event := &nostr.Event{
 		Kind:      1,
@@ -253,6 +257,41 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 	slog.Info("bsky poller: bridged reply into nostr thread",
 		"author", n.Author.Handle, "parentNostrID", parentNostrID[:8])
 	return true
+}
+
+// publishBskyAuthorProfile publishes a Nostr kind-0 metadata event for a
+// Bluesky author using their derived pseudonymous keypair. This allows Nostr
+// clients to display the author's profile and link back to their Bluesky account.
+func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) {
+	if n.Author.DID == "" || n.Author.Handle == "" {
+		return
+	}
+
+	profileURL := "https://bsky.app/profile/" + n.Author.Handle
+	name := n.Author.DisplayName
+	if name == "" {
+		name = n.Author.Handle
+	}
+
+	about := "Bluesky account\n" + profileURL
+
+	content := fmt.Sprintf(`{"name":%q,"about":%q,"website":%q}`,
+		name, about, profileURL)
+
+	meta := &nostr.Event{
+		Kind:      0,
+		Content:   content,
+		CreatedAt: nostr.Now(),
+	}
+
+	if err := p.Signer.Sign(meta, n.Author.DID); err != nil {
+		slog.Debug("bsky poller: failed to sign author profile", "author", n.Author.Handle, "error", err)
+		return
+	}
+
+	if err := p.Publisher.Publish(ctx, meta); err != nil {
+		slog.Debug("bsky poller: failed to publish author profile", "author", n.Author.Handle, "error", err)
+	}
 }
 
 // sendDMNotification delivers a Bluesky interaction as a NIP-04 self-DM.

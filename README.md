@@ -1,6 +1,6 @@
 # klistr
 
-A **personal bridge** between [Nostr](https://nostr.com/), the [Fediverse](https://en.wikipedia.org/wiki/Fediverse) (Mastodon, Misskey, Pixelfed, etc.), and optionally [Bluesky](https://bsky.app).
+A self-hosted personal bridge that connects your Nostr identity to the Fediverse.
 
 You run one instance, for yourself. Your Nostr posts appear on the Fediverse and Bluesky. Fediverse users can follow you. It's your identity across all three networks, simultaneously.
 

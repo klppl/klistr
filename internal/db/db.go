@@ -265,6 +265,26 @@ func (s *Store) StoreActorKey(pubkey, apActorURL string) error {
 	return err
 }
 
+// GetAllActorURLs returns every AP actor URL stored in actor_keys.
+// Used by AccountResyncer to periodically re-fetch and refresh profile data.
+func (s *Store) GetAllActorURLs() ([]string, error) {
+	rows, err := s.db.Query(`SELECT ap_actor_url FROM actor_keys`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var urls []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		urls = append(urls, u)
+	}
+	return urls, rows.Err()
+}
+
 // GetActorForKey returns the AP actor URL for a derived Nostr pubkey, if known.
 func (s *Store) GetActorForKey(pubkey string) (string, bool) {
 	var apActorURL string
@@ -312,6 +332,9 @@ type StoreStats struct {
 	BskyLastSeen string // ISO 8601 timestamp from kv table; empty if never polled
 	// Combined
 	TotalObjects int
+	// Account resync
+	LastResyncAt    string // ISO 8601 timestamp of last profile resync; empty if never run
+	LastResyncCount string // e.g. "42/43" (ok/total) from last resync
 }
 
 // Stats returns aggregate counts for the given followed actor URL.
@@ -334,6 +357,8 @@ func (s *Store) Stats(followedID string) (StoreStats, error) {
 		return st, err
 	}
 	st.BskyLastSeen, _ = s.GetKV("bsky_last_seen_at")
+	st.LastResyncAt, _ = s.GetKV("last_resync_at")
+	st.LastResyncCount, _ = s.GetKV("last_resync_count")
 	return st, nil
 }
 

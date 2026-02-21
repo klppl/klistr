@@ -51,6 +51,7 @@ type Server struct {
 	// Optional — set before Start() is called.
 	logBroadcaster  *LogBroadcaster
 	bskyTrigger     chan struct{}
+	resyncTrigger   chan struct{}
 	followPublisher FollowPublisher
 }
 
@@ -78,6 +79,10 @@ func (s *Server) SetBskyTrigger(ch chan struct{}) { s.bskyTrigger = ch }
 
 // SetFollowPublisher attaches the follow publisher used by the import endpoint.
 func (s *Server) SetFollowPublisher(fp FollowPublisher) { s.followPublisher = fp }
+
+// SetResyncTrigger attaches a channel that, when sent to, triggers an immediate
+// account profile resync. Nil disables the Re-sync Accounts button.
+func (s *Server) SetResyncTrigger(ch chan struct{}) { s.resyncTrigger = ch }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -152,7 +157,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	// Root — basic info page.
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "klistr\nhttps://github.com/klppl/klistr\n\nRunning on %s\n", s.cfg.LocalDomain)
+		fmt.Fprintf(w, "klistr — a self-hosted personal bridge that connects your Nostr identity to the Fediverse.\nhttps://github.com/klppl/klistr\n\nRunning on %s\n", s.cfg.LocalDomain)
 	})
 
 	// Web admin UI — only mounted when WEB_ADMIN password is configured.
@@ -165,6 +170,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/api/stats", s.handleAdminStats)
 			r.Get("/api/followers", s.handleAdminFollowers)
 			r.Post("/api/sync-bsky", s.handleAdminSyncBsky)
+			r.Post("/api/resync-accounts", s.handleAdminResyncAccounts)
 			r.Post("/api/import-following", s.handleImportFollowing)
 		})
 	}

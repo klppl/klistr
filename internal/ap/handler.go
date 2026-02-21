@@ -607,15 +607,33 @@ func htmlToText(h string) string {
 
 func buildMetadataContent(actor *Actor) string {
 	// Build JSON metadata from AP actor.
+	// Prefer the human-readable URL (e.g. https://mastodon.social/@alice) over
+	// the AP actor ID URL so Nostr clients can link back to the original profile.
+	profileURL := actor.URL
+	if profileURL == "" {
+		profileURL = actor.ID
+	}
+
+	about := htmlToText(actor.Summary)
+	if profileURL != "" {
+		if about != "" {
+			about += "\n\n"
+		}
+		about += profileURL
+	}
+
 	parts := []string{
 		fmt.Sprintf(`"name":"%s"`, jsonEscape(actor.Name)),
-		fmt.Sprintf(`"about":"%s"`, jsonEscape(htmlToText(actor.Summary))),
+		fmt.Sprintf(`"about":"%s"`, jsonEscape(about)),
 	}
 	if actor.Icon != nil {
 		parts = append(parts, fmt.Sprintf(`"picture":"%s"`, jsonEscape(actor.Icon.URL)))
 	}
 	if actor.Image != nil {
 		parts = append(parts, fmt.Sprintf(`"banner":"%s"`, jsonEscape(actor.Image.URL)))
+	}
+	if profileURL != "" {
+		parts = append(parts, fmt.Sprintf(`"website":"%s"`, jsonEscape(profileURL)))
 	}
 	return "{" + strings.Join(parts, ",") + "}"
 }

@@ -76,7 +76,22 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"bsky_objects":        stats.BskyObjects,
 		"bsky_last_seen":      stats.BskyLastSeen,
 		"total_objects":       stats.TotalObjects,
+		"last_resync_at":      stats.LastResyncAt,
+		"last_resync_count":   stats.LastResyncCount,
 	}, http.StatusOK)
+}
+
+func (s *Server) handleAdminResyncAccounts(w http.ResponseWriter, r *http.Request) {
+	if s.resyncTrigger == nil {
+		jsonResponse(w, map[string]string{"message": "Account resync is not available."}, http.StatusOK)
+		return
+	}
+	select {
+	case s.resyncTrigger <- struct{}{}:
+		jsonResponse(w, map[string]string{"message": "Account resync triggered — profiles will refresh in the background."}, http.StatusOK)
+	default:
+		jsonResponse(w, map[string]string{"message": "Resync already queued."}, http.StatusOK)
+	}
 }
 
 func (s *Server) handleAdminFollowers(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +324,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
         <div class="bp-row"><span class="bpl">Followers</span><span class="bpv big" id="bp-ap-followers">—</span></div>
         <div class="bp-row"><span class="bpl">Known actors</span><span class="bpv" id="bp-ap-actors">—</span></div>
         <div class="bp-row"><span class="bpl">Objects</span><span class="bpv" id="bp-ap-objects">—</span></div>
+        <div class="bp-row"><span class="bpl">Last resync</span><span class="bpv sm" id="bp-last-resync">—</span></div>
       </div>
     </div>
 
@@ -367,11 +383,16 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       Force Bluesky Sync
     </button>
+    <button class="btn btn-blue" id="btn-resync" onclick="resyncAccounts()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
+      Re-sync Accounts
+    </button>
     <button class="btn btn-surface" onclick="refreshAll()">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       Refresh Stats
     </button>
   </div>
+  <p style="color:var(--muted);font-size:11px;margin-top:10px">Re-sync Accounts re-fetches all known Fediverse profiles and re-publishes their Nostr kind-0 metadata. Also runs automatically every 24 hours.</p>
   <div class="action-msg" id="action-msg"></div>
 </div>
 
@@ -583,6 +604,14 @@ async function loadStats() {
   document.getElementById('bp-ap-followers').textContent = d.fediverse_followers ?? '—';
   document.getElementById('bp-ap-actors').textContent    = d.fediverse_actors    ?? '—';
   document.getElementById('bp-ap-objects').textContent   = d.fediverse_objects   ?? '—';
+  const resyncEl = document.getElementById('bp-last-resync');
+  if (d.last_resync_at) {
+    const countSuffix = d.last_resync_count ? ' ('+d.last_resync_count+')' : '';
+    resyncEl.textContent = relativeTime(d.last_resync_at) + countSuffix;
+    resyncEl.title = d.last_resync_at;
+  } else {
+    resyncEl.textContent = 'never';
+  }
 
   // Bluesky panel
   const bskyBody = document.getElementById('bp-bsky-body');
@@ -634,6 +663,25 @@ async function syncBsky() {
     document.getElementById('action-msg').textContent = 'Error: '+e.message;
   } finally {
     btn.disabled = !bskyEnabled;
+    btn.innerHTML = orig;
+  }
+}
+
+async function resyncAccounts() {
+  const btn = document.getElementById('btn-resync');
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.textContent = 'Queuing…';
+  try {
+    const r = await fetch('/web/api/resync-accounts', {method:'POST'});
+    const d = await r.json();
+    document.getElementById('action-msg').textContent = d.message;
+    toast(d.message);
+    setTimeout(loadStats, 3000);
+  } catch(e) {
+    document.getElementById('action-msg').textContent = 'Error: '+e.message;
+  } finally {
+    btn.disabled = false;
     btn.innerHTML = orig;
   }
 }

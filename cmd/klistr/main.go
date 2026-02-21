@@ -1,4 +1,4 @@
-// klistr is a lightweight single-user bridge between Nostr and the ActivityPub Fediverse.
+// klistr is a self-hosted personal bridge that connects your Nostr identity to the Fediverse.
 // It runs as a single binary with SQLite by default, requiring no external
 // database for self-hosted deployments.
 //
@@ -195,6 +195,17 @@ func main() {
 		}
 	}
 
+	// ─── Account Profile Resyncer ─────────────────────────────────────────────
+	resyncTrigger := make(chan struct{}, 1)
+	resyncer := &ap.AccountResyncer{
+		Signer:    signer,
+		Publisher: publisher,
+		Store:     store,
+		Interval:  24 * time.Hour,
+		TriggerCh: resyncTrigger,
+	}
+	go resyncer.Start(ctx)
+
 	// ─── Start relay subscription ─────────────────────────────────────────────
 	pool := nostrpkg.NewRelayPool(cfg.NostrRelays, cfg.NostrRelays, cfg.NostrPublicKey, nostrHandler.Handle)
 	go pool.Start(ctx)
@@ -207,6 +218,7 @@ func main() {
 	if bskyTrigger != nil {
 		srv.SetBskyTrigger(bskyTrigger)
 	}
+	srv.SetResyncTrigger(resyncTrigger)
 	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})
 	srv.Start(ctx) // blocks until ctx is cancelled
 

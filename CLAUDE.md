@@ -67,6 +67,7 @@ Bluesky notifications poll (30s)  →  bsky.Poller  →  nostr.Publisher  →  r
 - **`internal/ap/`** — ActivityPub logic:
   - `transmute.go` — Converts Nostr events → AP objects (`ToActor`, `ToNote`, `ToAnnounce`, `ToLike`, etc.) and builds AP activities (`BuildCreate`, `BuildUpdate`, `BuildFollow`, `BuildAccept`). Uses `TransmuteContext` (holds `LocalDomain`, `LocalActorURL`, `PublicKeyPem`, and an object-ID-lookup callback).
   - `handler.go` — `APHandler`: receives incoming AP activities, converts them to Nostr events, publishes to relays. Handles Follow/Unfollow/Delete/Like/Announce. On Follow, notifies local user via NIP-04 DM to self.
+  - `resync.go` — `AccountResyncer`: runs every 24h (and on manual trigger) — iterates all `actor_keys` AP URLs, re-fetches each actor via HTTP, re-publishes kind-0 with fresh profile data. Stores `last_resync_at` and `last_resync_count` in the `kv` table.
   - `federation.go` — `Federator`: delivers AP activities outbound. Resolves follower lists, fetches actor inboxes, deduplicates by shared inbox per origin.
   - `client.go` — HTTP client for fetching AP actors/objects with in-memory caching. Defines `ErrGone` for HTTP 410 responses (deleted actors); signature verification skips and accepts activities from gone actors.
   - `crypto.go` / `keys.go` — RSA key management; auto-generates key pair if PEM files don't exist.

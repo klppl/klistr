@@ -571,3 +571,9 @@ func (rw *responseWriter) WriteHeader(status int) {
 	rw.status = status
 	rw.ResponseWriter.WriteHeader(status)
 }
+
+// Unwrap allows http.ResponseController to reach the underlying ResponseWriter
+// so SetWriteDeadline works correctly (e.g. for long-lived SSE connections).
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}

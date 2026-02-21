@@ -348,7 +348,7 @@ function appendLog(raw) {
 function connectLog() {
   const dot = document.getElementById('dot');
   const status = document.getElementById('log-status');
-  const src = new EventSource('/web/log/stream');
+  const src = new EventSource('/web/log/stream', {withCredentials: true});
   src.onopen = () => { dot.className = 'dot live'; status.textContent = 'live'; };
   src.onmessage = e => appendLog(e.data);
   src.onerror = () => {

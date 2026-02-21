@@ -220,18 +220,6 @@ func NotificationToNostrEvent(n *Notification, localPubKey string) (*nostr.Event
 		}
 		return event, nil
 
-	case "reply", "mention", "quote":
-		// Bluesky text interaction → Nostr kind-1 note with proxy tag.
-		content := extractNotifText(n)
-		event := &nostr.Event{
-			Kind:      1,
-			Content:   fmt.Sprintf("[@%s] %s\n%s", n.Author.Handle, content, atURIToHTTPS(n.URI)),
-			CreatedAt: nostr.Now(),
-			Tags:      nostr.Tags{proxyTag},
-			PubKey:    localPubKey,
-		}
-		return event, nil
-
 	case "follow":
 		// Handled via DM notification in poller; no Nostr event created here.
 		return nil, nil
@@ -256,6 +244,30 @@ func atURIToHTTPS(uri string) string {
 	// parts[1] is collection (e.g. app.bsky.feed.post), parts[2] is rkey
 	rkey := parts[2]
 	return fmt.Sprintf("https://bsky.app/profile/%s/post/%s", did, rkey)
+}
+
+// extractReplyRefs returns the parent and root AT URIs from a Bluesky reply
+// record's reply reference block (reply.parent.uri / reply.root.uri).
+// Returns empty strings if the record is not a reply or the fields are absent.
+func extractReplyRefs(n *Notification) (parentURI, rootURI string) {
+	if n.Record == nil {
+		return
+	}
+	m, ok := n.Record.(map[string]interface{})
+	if !ok {
+		return
+	}
+	reply, ok := m["reply"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if parent, ok := reply["parent"].(map[string]interface{}); ok {
+		parentURI, _ = parent["uri"].(string)
+	}
+	if root, ok := reply["root"].(map[string]interface{}); ok {
+		rootURI, _ = root["uri"].(string)
+	}
+	return
 }
 
 // extractNotifText attempts to pull the text from a notification record.

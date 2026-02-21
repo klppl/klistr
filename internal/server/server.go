@@ -1,0 +1,470 @@
+// Package server implements the HTTP server for the klistr bridge.
+// It serves ActivityPub endpoints (actors, objects, inbox, webfinger, etc.)
+// and handles all inbound federation from the fediverse.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/klppl/klistr/internal/ap"
+	"github.com/klppl/klistr/internal/config"
+	"github.com/klppl/klistr/internal/db"
+)
+
+const (
+	activityJSONType = `application/activity+json`
+	ldJSONType       = `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`
+	version          = "1.0.0"
+)
+
+// Server is the main HTTP server for klistr.
+type Server struct {
+	cfg       *config.Config
+	store     *db.Store
+	keyPair   *ap.KeyPair
+	apHandler *ap.APHandler
+	router    *chi.Mux
+}
+
+// New creates a new Server.
+func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap.APHandler) *Server {
+	s := &Server{
+		cfg:       cfg,
+		store:     store,
+		keyPair:   keyPair,
+		apHandler: apHandler,
+	}
+	s.router = s.buildRouter()
+	return s
+}
+
+// Start runs the HTTP server until ctx is cancelled.
+func (s *Server) Start(ctx context.Context) {
+	addr := ":" + s.cfg.Port
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      s.router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	slog.Info("starting HTTP server", "addr", addr, "domain", s.cfg.LocalDomain)
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			slog.Error("server shutdown error", "error", err)
+		}
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("server error", "error", err)
+	}
+}
+
+func (s *Server) buildRouter() *chi.Mux {
+	r := chi.NewRouter()
+
+	r.Use(middleware.RealIP)
+	r.Use(loggingMiddleware)
+	r.Use(middleware.Recoverer)
+	r.Use(corsMiddleware)
+
+	// Health check.
+	r.Get("/api/healthcheck", func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+	})
+
+	// Discovery endpoints.
+	r.Get("/.well-known/webfinger", s.handleWebFinger)
+	r.Get("/.well-known/host-meta", s.handleHostMeta)
+	r.Get("/.well-known/nodeinfo", s.handleNodeInfo)
+	r.Get("/.well-known/nostr.json", s.handleNIP05)
+
+	// NodeInfo schema.
+	r.Get("/nodeinfo/{version}", s.handleNodeInfoSchema)
+
+	// ActivityPub actor endpoints.
+	r.Get("/users/{username}", s.handleActor)
+	r.Get("/users/{username}/followers", s.handleFollowers)
+	r.Get("/users/{username}/following", s.handleFollowing)
+	r.Get("/users/{username}/outbox", s.handleOutbox)
+	r.Post("/users/{username}/inbox", s.handleInbox)
+
+	// ActivityPub object endpoints.
+	r.Get("/objects/{id}", s.handleObject)
+
+	// Shared inbox.
+	r.Post("/inbox", s.handleInbox)
+
+	// Service actor.
+	r.Get("/actor", s.handleServiceActor)
+
+	// Tags (stub).
+	r.Get("/tags/{tag}", func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, []interface{}{}, http.StatusOK)
+	})
+
+	// Root — basic info page.
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "klistr\nhttps://github.com/klppl/klistr\n\nRunning on %s\n", s.cfg.LocalDomain)
+	})
+
+	return r
+}
+
+// ─── ActivityPub Handlers ─────────────────────────────────────────────────────
+
+func (s *Server) handleActor(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	if username != s.cfg.NostrUsername {
+		http.NotFound(w, r)
+		return
+	}
+
+	actorURL := s.cfg.BaseURL("/users/" + username)
+	actor := &ap.Actor{
+		ID:                actorURL,
+		Type:              "Person",
+		PreferredUsername: username,
+		Name:              username,
+		Inbox:             actorURL + "/inbox",
+		Outbox:            actorURL + "/outbox",
+		Followers:         actorURL + "/followers",
+		Following:         actorURL + "/following",
+		PublicKey: &ap.PublicKey{
+			ID:           actorURL + "#main-key",
+			Owner:        actorURL,
+			PublicKeyPem: s.keyPair.PublicPEM,
+		},
+		Endpoints: &ap.Endpoints{
+			SharedInbox: s.cfg.BaseURL("/inbox"),
+		},
+		ProxyOf: []ap.Proxy{{
+			Protocol:      ap.NostrProtocolURI,
+			Proxied:       s.cfg.NostrPublicKey,
+			Authoritative: true,
+		}},
+	}
+
+	apResponse(w, ap.WithContext(actor))
+}
+
+func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+
+	// Return a minimal note — in a full implementation we'd fetch from relay.
+	note := map[string]interface{}{
+		"@context":     ap.DefaultContext,
+		"id":           s.cfg.BaseURL("/objects/" + id),
+		"type":         "Note",
+		"attributedTo": s.cfg.BaseURL("/users/" + s.cfg.NostrUsername),
+		"content":      "",
+	}
+	apResponse(w, note)
+}
+
+func (s *Server) handleFollowers(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	if username != s.cfg.NostrUsername {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Followers are stored keyed by the full local actor URL.
+	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+	followers, err := s.store.GetFollowers(localActorURL)
+	if err != nil {
+		slog.Error("get followers", "error", err)
+		followers = []string{}
+	}
+
+	collection := ap.OrderedCollection{
+		Context:      ap.DefaultContext,
+		ID:           localActorURL + "/followers",
+		Type:         "OrderedCollection",
+		TotalItems:   len(followers),
+		OrderedItems: followers,
+	}
+	apResponse(w, collection)
+}
+
+func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	if username != s.cfg.NostrUsername {
+		http.NotFound(w, r)
+		return
+	}
+
+	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+	following, err := s.store.GetFollowing(localActorURL)
+	if err != nil {
+		following = []string{}
+	}
+
+	collection := ap.OrderedCollection{
+		Context:      ap.DefaultContext,
+		ID:           localActorURL + "/following",
+		Type:         "OrderedCollection",
+		TotalItems:   len(following),
+		OrderedItems: following,
+	}
+	apResponse(w, collection)
+}
+
+func (s *Server) handleOutbox(w http.ResponseWriter, r *http.Request) {
+	username := chi.URLParam(r, "username")
+	if username != s.cfg.NostrUsername {
+		http.NotFound(w, r)
+		return
+	}
+
+	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+	collection := ap.OrderedCollection{
+		Context:      ap.DefaultContext,
+		ID:           localActorURL + "/outbox",
+		Type:         "OrderedCollection",
+		TotalItems:   0,
+		OrderedItems: []interface{}{},
+	}
+	apResponse(w, collection)
+}
+
+func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
+	// Verify HTTP signature.
+	if s.cfg.SignFetch {
+		if _, err := ap.VerifySignature(r); err != nil {
+			slog.Warn("invalid HTTP signature", "error", err, "remote", r.RemoteAddr)
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+
+	// Handle the activity asynchronously.
+	go func() {
+		ctx := context.Background()
+		if err := s.apHandler.HandleActivity(ctx, json.RawMessage(body)); err != nil {
+			slog.Warn("failed to handle activity", "error", err)
+		}
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleServiceActor(w http.ResponseWriter, r *http.Request) {
+	actor := &ap.Actor{
+		ID:                s.cfg.BaseURL("/actor"),
+		Type:              "Application",
+		Name:              "klistr",
+		PreferredUsername: "klistr",
+		Inbox:             s.cfg.BaseURL("/inbox"),
+		Outbox:            s.cfg.BaseURL("/actor/outbox"),
+		PublicKey: &ap.PublicKey{
+			ID:           s.cfg.BaseURL("/actor#main-key"),
+			Owner:        s.cfg.BaseURL("/actor"),
+			PublicKeyPem: s.keyPair.PublicPEM,
+		},
+		URL: "https://github.com/klppl/klistr",
+	}
+	apResponse(w, ap.WithContext(actor))
+}
+
+// ─── Discovery Handlers ───────────────────────────────────────────────────────
+
+func (s *Server) handleWebFinger(w http.ResponseWriter, r *http.Request) {
+	resource := r.URL.Query().Get("resource")
+	if resource == "" {
+		http.Error(w, "missing resource", http.StatusBadRequest)
+		return
+	}
+
+	// Parse acct: URIs like acct:alice@example.com
+	acct := strings.TrimPrefix(resource, "acct:")
+	parts := strings.SplitN(acct, "@", 2)
+	if len(parts) != 2 {
+		http.Error(w, "invalid resource", http.StatusBadRequest)
+		return
+	}
+
+	user := parts[0]
+	host := parts[1]
+	localHost := s.cfg.URL().Host
+
+	if host != localHost {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Only resolve the configured username.
+	if user != s.cfg.NostrUsername {
+		http.NotFound(w, r)
+		return
+	}
+
+	actorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+
+	resp := ap.WebFingerResponse{
+		Subject: resource,
+		Aliases: []string{actorURL},
+		Links: []ap.WebFingerLink{
+			{
+				Rel:  "self",
+				Type: activityJSONType,
+				Href: actorURL,
+			},
+			{
+				Rel:      "http://ostatus.org/schema/1.0/subscribe",
+				Template: s.cfg.BaseURL("/authorize_interaction?uri={uri}"),
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/jrd+json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	cacheHeaders(w, 3600)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleNIP05(w http.ResponseWriter, r *http.Request) {
+	// NIP-05 lookup: /.well-known/nostr.json?name=alice
+	name := r.URL.Query().Get("name")
+	if name == "" || name != s.cfg.NostrUsername {
+		jsonResponse(w, map[string]interface{}{"names": map[string]string{}}, http.StatusOK)
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"names": map[string]string{
+			s.cfg.NostrUsername: s.cfg.NostrPublicKey,
+		},
+	}, http.StatusOK)
+}
+
+func (s *Server) handleHostMeta(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/xrd+xml")
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+  <Link rel="lrdd" template="%s/.well-known/webfinger?resource={uri}"/>
+</XRD>`, s.cfg.LocalDomain)
+}
+
+func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]interface{}{
+		"links": []map[string]string{
+			{
+				"rel":  "http://nodeinfo.diaspora.software/ns/schema/2.1",
+				"href": s.cfg.BaseURL("/nodeinfo/2.1"),
+			},
+		},
+	}
+	cacheHeaders(w, 3600)
+	jsonResponse(w, resp, http.StatusOK)
+}
+
+func (s *Server) handleNodeInfoSchema(w http.ResponseWriter, r *http.Request) {
+	v := chi.URLParam(r, "version")
+	if v != "2.0" && v != "2.1" {
+		http.Error(w, "unsupported nodeinfo version", http.StatusNotFound)
+		return
+	}
+
+	info := ap.NodeInfo{
+		Version: "2.1",
+		Software: ap.NodeInfoSoftware{
+			Name:    "klistr",
+			Version: version,
+		},
+		Protocols: []string{"activitypub"},
+		Usage: ap.NodeInfoUsage{
+			Users: ap.NodeInfoUsers{},
+		},
+		OpenRegistrations: false,
+	}
+	cacheHeaders(w, 3600)
+	jsonResponse(w, info, http.StatusOK)
+}
+
+// ─── Utility functions ────────────────────────────────────────────────────────
+
+func apResponse(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", activityJSONType)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("failed to encode AP response", "error", err)
+	}
+}
+
+func jsonResponse(w http.ResponseWriter, v interface{}, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("failed to encode JSON response", "error", err)
+	}
+}
+
+func cacheHeaders(w http.ResponseWriter, maxAge int) {
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", maxAge))
+}
+
+// loggingMiddleware logs each HTTP request.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(wrapped, r)
+		slog.Debug("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", wrapped.status,
+			"duration", time.Since(start),
+			"remote", r.RemoteAddr,
+		)
+	})
+}
+
+// corsMiddleware adds CORS headers for fediverse compatibility.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *responseWriter) WriteHeader(status int) {
+	rw.status = status
+	rw.ResponseWriter.WriteHeader(status)
+}

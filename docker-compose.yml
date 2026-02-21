@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  klistr:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - LOCAL_DOMAIN=${LOCAL_DOMAIN:-http://localhost:8000}
+      - SECRET_KEY=${SECRET_KEY}
+      - NOSTR_RELAY=${NOSTR_RELAY:-wss://relay.mostr.pub}
+      - DATABASE_URL=/data/klistr.db
+      - RSA_PRIVATE_KEY_PATH=/data/private.pem
+      - RSA_PUBLIC_KEY_PATH=/data/public.pem
+      - PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "/klistr", "-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -30,6 +30,7 @@ type Signer interface {
 
 // PollerStore is the subset of db.Store used by the Poller.
 type PollerStore interface {
+	AddObject(apID, nostrID string) error
 	GetNostrIDForObject(apID string) (string, bool)
 	SetKV(key, value string) error
 	GetKV(key string) (string, bool)
@@ -221,8 +222,10 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		Content:   content,
 		CreatedAt: nostr.Now(),
 		Tags: nostr.Tags{
-			{"e", rootNostrID, "", "root"},
-			{"e", parentNostrID, "", "reply"},
+			// Use 2-element e-tags (no relay hint) to satisfy strict relay schemas.
+			// Positional convention (NIP-10): first = root, last = direct parent.
+			{"e", rootNostrID},
+			{"e", parentNostrID},
 			{"p", p.LocalPubKey},
 			// proxy tag prevents the outbound Bluesky bridge from re-posting this.
 			{"proxy", n.URI, "atproto"},
@@ -239,6 +242,12 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 	if err := p.Publisher.Publish(ctx, event); err != nil {
 		slog.Warn("bsky poller: failed to publish reply event", "author", n.Author.Handle, "error", err)
 		return false
+	}
+
+	// Store AT URI → Nostr event ID so that when the local user replies to this
+	// event from Nostr, buildReply can resolve the AT URI for correct threading.
+	if err := p.Store.AddObject(n.URI, event.ID); err != nil {
+		slog.Warn("bsky poller: failed to store reply mapping", "atURI", n.URI, "error", err)
 	}
 
 	slog.Info("bsky poller: bridged reply into nostr thread",

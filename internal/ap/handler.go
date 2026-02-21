@@ -27,6 +27,7 @@ type APHandler struct {
 	Store interface {
 		AddObject(apID, nostrID string) error
 		AddFollow(followerID, followedID string) error
+		RemoveFollow(followerID, followedID string) error
 		GetNostrIDForObject(apID string) (string, bool)
 	}
 	Federator  *Federator
@@ -331,7 +332,9 @@ func (h *APHandler) handleUndo(ctx context.Context, activity IncomingActivity) e
 			return nil
 		}
 		slog.Debug("handling unfollow", "actor", activity.Actor, "followed", followedID)
-		// TODO: Remove follow from store
+		if err := h.Store.RemoveFollow(activity.Actor, followedID); err != nil {
+			slog.Warn("failed to remove follow", "error", err)
+		}
 	}
 
 	return nil
@@ -377,7 +380,7 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 
 	// Add reply tag.
 	if note.InReplyTo != "" {
-		replyNostrID, ok := h.Store.GetNostrIDForObject(note.InReplyTo)
+		replyNostrID, ok := h.resolveNostrID(note.InReplyTo)
 		if !ok {
 			// Can't resolve parent; skip this note.
 			return nil, nil
@@ -387,7 +390,7 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 
 	// Add quote tag.
 	if note.QuoteURL != "" {
-		quoteNostrID, ok := h.Store.GetNostrIDForObject(note.QuoteURL)
+		quoteNostrID, ok := h.resolveNostrID(note.QuoteURL)
 		if !ok {
 			return nil, nil
 		}
@@ -437,6 +440,19 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		return nil, fmt.Errorf("sign event: %w", err)
 	}
 	return event, nil
+}
+
+// resolveNostrID returns the Nostr event ID for an AP object URL.
+// For local objects (https://domain/objects/<nostr-id>) the ID is extracted
+// directly from the URL — no DB lookup needed, and crucially this works even
+// for events that were never explicitly stored (e.g. outbound Nostr posts).
+// For remote objects it falls back to the DB.
+func (h *APHandler) resolveNostrID(apObjectID string) (string, bool) {
+	localPrefix := strings.TrimRight(h.LocalDomain, "/") + "/objects/"
+	if strings.HasPrefix(apObjectID, localPrefix) {
+		return strings.TrimPrefix(apObjectID, localPrefix), true
+	}
+	return h.Store.GetNostrIDForObject(apObjectID)
 }
 
 func (h *APHandler) fetchAndCacheActor(ctx context.Context, actorID string) {

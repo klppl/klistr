@@ -139,7 +139,7 @@ func (s *Store) GetAPIDForObject(nostrID string) (string, bool) {
 		return v.(string), true
 	}
 	var apID string
-	err := s.db.QueryRow(`SELECT ap_id FROM objects WHERE nostr_id = ?`, s.placeholder(nostrID)).Scan(&apID)
+	err := s.db.QueryRow(`SELECT ap_id FROM objects WHERE nostr_id = `+s.ph(), nostrID).Scan(&apID)
 	if err != nil {
 		return "", false
 	}
@@ -154,7 +154,7 @@ func (s *Store) GetNostrIDForObject(apID string) (string, bool) {
 		return v.(string), true
 	}
 	var nostrID string
-	err := s.db.QueryRow(`SELECT nostr_id FROM objects WHERE ap_id = ?`, s.placeholder(apID)).Scan(&nostrID)
+	err := s.db.QueryRow(`SELECT nostr_id FROM objects WHERE ap_id = `+s.ph(), apID).Scan(&nostrID)
 	if err != nil {
 		return "", false
 	}
@@ -207,7 +207,7 @@ func (s *Store) RemoveFollow(followerID, followedID string) error {
 
 // GetFollowers returns all follower IDs for a given followed ID.
 func (s *Store) GetFollowers(followedID string) ([]string, error) {
-	rows, err := s.db.Query(`SELECT follower_id FROM follows WHERE followed_id = ?`, s.placeholder(followedID))
+	rows, err := s.db.Query(`SELECT follower_id FROM follows WHERE followed_id = `+s.ph(), followedID)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +226,7 @@ func (s *Store) GetFollowers(followedID string) ([]string, error) {
 
 // GetFollowing returns all followed IDs for a given follower ID.
 func (s *Store) GetFollowing(followerID string) ([]string, error) {
-	rows, err := s.db.Query(`SELECT followed_id FROM follows WHERE follower_id = ?`, s.placeholder(followerID))
+	rows, err := s.db.Query(`SELECT followed_id FROM follows WHERE follower_id = `+s.ph(), followerID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +260,7 @@ func (s *Store) StoreActorKey(pubkey, apActorURL string) error {
 // GetActorForKey returns the AP actor URL for a derived Nostr pubkey, if known.
 func (s *Store) GetActorForKey(pubkey string) (string, bool) {
 	var apActorURL string
-	err := s.db.QueryRow(`SELECT ap_actor_url FROM actor_keys WHERE pubkey = ?`, s.placeholder(pubkey)).Scan(&apActorURL)
+	err := s.db.QueryRow(`SELECT ap_actor_url FROM actor_keys WHERE pubkey = `+s.ph(), pubkey).Scan(&apActorURL)
 	if err != nil {
 		return "", false
 	}
@@ -269,12 +269,13 @@ func (s *Store) GetActorForKey(pubkey string) (string, bool) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// placeholder returns the appropriate placeholder for the driver.
-// SQLite uses ? while PostgreSQL requires $1, $2, etc.
-// For simple single-value queries we just return the value directly for SQLite
-// and use a different query builder for Postgres above.
-func (s *Store) placeholder(v string) interface{} {
-	return v
+// ph returns the SQL placeholder token for a single-argument query.
+// SQLite uses ? and PostgreSQL uses $1.
+func (s *Store) ph() string {
+	if s.driver == "postgres" {
+		return "$1"
+	}
+	return "?"
 }
 
 func detectDriver(u string) (driver, dsn string) {

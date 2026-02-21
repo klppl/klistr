@@ -303,7 +303,8 @@ func IsActor(obj map[string]interface{}) bool {
 
 // IsLocalID returns true if the AP ID belongs to our local domain.
 func IsLocalID(apID, localDomain string) bool {
-	return strings.HasPrefix(apID, localDomain)
+	base := strings.TrimRight(localDomain, "/")
+	return apID == base || strings.HasPrefix(apID, base+"/")
 }
 
 // IsActorID returns true if the ID looks like an AP actor URL.

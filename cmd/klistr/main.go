@@ -86,10 +86,9 @@ func main() {
 	}
 
 	// ─── AP Federator ─────────────────────────────────────────────────────────
-	serviceActorID := cfg.BaseURL("/actor")
 	federator := &ap.Federator{
 		LocalDomain: cfg.LocalDomain,
-		KeyID:       serviceActorID + "#main-key",
+		KeyID:       localActorURL + "#main-key",
 		PrivateKey:  keyPair.Private,
 		GetFollowers: func(actorURL string) ([]string, error) {
 			return store.GetFollowers(actorURL)

@@ -33,6 +33,7 @@ type Config struct {
 	Port              string
 	BskyIdentifier    string // BSKY_IDENTIFIER env var (handle or DID)
 	BskyAppPassword   string // BSKY_APP_PASSWORD env var
+	WebAdminPassword  string // WEB_ADMIN env var — enables /web admin UI when set
 }
 
 // BskyEnabled returns true if Bluesky bridge credentials are configured.
@@ -105,6 +106,7 @@ func Load() *Config {
 		Port:              getEnv("PORT", "8000"),
 		BskyIdentifier:    os.Getenv("BSKY_IDENTIFIER"),
 		BskyAppPassword:   os.Getenv("BSKY_APP_PASSWORD"),
+		WebAdminPassword:  os.Getenv("WEB_ADMIN"),
 	}
 }
 

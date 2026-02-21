@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -28,12 +29,20 @@ import (
 )
 
 func main() {
-	// Structured JSON logging by default — easy to parse with any log aggregator.
+	// Structured JSON logging. When WEB_ADMIN is set, a LogBroadcaster wraps
+	// os.Stdout so the live log stream at /web/log/stream can fan out entries.
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	var logBroadcaster *server.LogBroadcaster
+	var logOut io.Writer = os.Stdout
+	if os.Getenv("WEB_ADMIN") != "" {
+		lb := server.NewLogBroadcaster(os.Stdout)
+		logBroadcaster = lb
+		logOut = lb
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{
 		Level: logLevel,
 	})))
 
@@ -121,6 +130,7 @@ func main() {
 	defer cancel()
 
 	// ─── Bluesky bridge (optional) ────────────────────────────────────────────
+	var bskyTrigger chan struct{}
 	if cfg.BskyEnabled() {
 		bskyClient := bsky.NewClient(cfg.BskyIdentifier, cfg.BskyAppPassword)
 		if err := bskyClient.Authenticate(ctx); err != nil {
@@ -132,6 +142,7 @@ func main() {
 				LocalDomain:     cfg.LocalDomain,
 				ExternalBaseURL: cfg.ExternalBaseURL,
 			}
+			bskyTrigger = make(chan struct{}, 1)
 			poller := &bsky.Poller{
 				Client:      bskyClient,
 				Publisher:   publisher,
@@ -139,6 +150,7 @@ func main() {
 				Store:       store,
 				LocalPubKey: cfg.NostrPublicKey,
 				Interval:    30 * time.Second,
+				TriggerCh:   bskyTrigger,
 			}
 			go poller.Start(ctx)
 			slog.Info("bsky bridge enabled", "identifier", cfg.BskyIdentifier)
@@ -151,6 +163,12 @@ func main() {
 
 	// ─── Start HTTP server ────────────────────────────────────────────────────
 	srv := server.New(cfg, store, keyPair, apHandler, store, signer)
+	if logBroadcaster != nil {
+		srv.SetLogBroadcaster(logBroadcaster)
+	}
+	if bskyTrigger != nil {
+		srv.SetBskyTrigger(bskyTrigger)
+	}
 	srv.Start(ctx) // blocks until ctx is cancelled
 
 	slog.Info("klistr bridge stopped")

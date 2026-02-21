@@ -46,6 +46,10 @@ type Server struct {
 	router        *chi.Mux
 	actorKeyStore ActorKeyStore
 	actorResolver ActorResolver
+
+	// Optional — set before Start() is called.
+	logBroadcaster *LogBroadcaster
+	bskyTrigger    chan struct{}
 }
 
 // New creates a new Server.
@@ -61,6 +65,13 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 	s.router = s.buildRouter()
 	return s
 }
+
+// SetLogBroadcaster attaches a LogBroadcaster for the /web/log/stream SSE endpoint.
+func (s *Server) SetLogBroadcaster(lb *LogBroadcaster) { s.logBroadcaster = lb }
+
+// SetBskyTrigger attaches a channel that, when sent to, triggers an immediate
+// Bluesky poll. Nil disables the Force Sync button.
+func (s *Server) SetBskyTrigger(ch chan struct{}) { s.bskyTrigger = ch }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -137,6 +148,19 @@ func (s *Server) buildRouter() *chi.Mux {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "klistr\nhttps://github.com/klppl/klistr\n\nRunning on %s\n", s.cfg.LocalDomain)
 	})
+
+	// Web admin UI — only mounted when WEB_ADMIN password is configured.
+	if s.cfg.WebAdminPassword != "" {
+		r.Route("/web", func(r chi.Router) {
+			r.Use(s.adminAuth)
+			r.Get("/", s.handleAdminDashboard)
+			r.Get("/log/stream", s.handleAdminLogStream)
+			r.Get("/api/status", s.handleAdminStatus)
+			r.Get("/api/stats", s.handleAdminStats)
+			r.Get("/api/followers", s.handleAdminFollowers)
+			r.Post("/api/sync-bsky", s.handleAdminSyncBsky)
+		})
+	}
 
 	return r
 }

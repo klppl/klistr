@@ -299,6 +299,30 @@ func (s *Store) GetKV(key string) (string, bool) {
 	return value, true
 }
 
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
+// StoreStats holds aggregate counts returned by Stats.
+type StoreStats struct {
+	FollowerCount  int
+	ObjectCount    int
+	ActorKeyCount  int
+}
+
+// Stats returns aggregate counts for the given followed actor URL.
+func (s *Store) Stats(followedID string) (StoreStats, error) {
+	var st StoreStats
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM follows WHERE followed_id = `+s.ph(), followedID).Scan(&st.FollowerCount); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects`).Scan(&st.ObjectCount); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM actor_keys`).Scan(&st.ActorKeyCount); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // ph returns the SQL placeholder token for a single-argument query.

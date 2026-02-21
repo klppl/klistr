@@ -35,6 +35,9 @@ NOSTR_RELAY=wss://relay1.example.com,wss://relay2.example.com
 BSKY_IDENTIFIER=user.bsky.social    # Bluesky handle or DID
 BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx  # Bluesky app password (Settings → App Passwords)
 
+# Web admin UI (optional — omit to disable /web entirely)
+WEB_ADMIN=<password>            # Enables /web admin dashboard; HTTP Basic Auth password
+
 # Other
 LOG_LEVEL=info|debug            # slog structured output level
 EXTERNAL_BASE_URL=https://njump.me  # Base URL for Nostr links

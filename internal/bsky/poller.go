@@ -36,6 +36,8 @@ type Poller struct {
 	Store       PollerStore
 	LocalPubKey string
 	Interval    time.Duration
+	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
+	TriggerCh <-chan struct{}
 }
 
 // Start begins the notification polling loop. Blocks until ctx is cancelled.
@@ -53,12 +55,18 @@ func (p *Poller) Start(ctx context.Context) {
 	// Poll once immediately on start.
 	p.poll(ctx)
 
+	// A nil channel blocks forever — safe to select on when TriggerCh is unset.
+	trigCh := p.TriggerCh
+
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("bsky poller stopped")
 			return
 		case <-ticker.C:
+			p.poll(ctx)
+		case <-trigCh:
+			slog.Info("bsky poll triggered manually")
 			p.poll(ctx)
 		}
 	}

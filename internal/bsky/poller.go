@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -273,10 +274,37 @@ func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) 
 		name = n.Author.Handle
 	}
 
-	about := "Bluesky account\n" + profileURL
+	// Default bio is just the profile link; replaced with the real bio if the
+	// full profile fetch succeeds.
+	about := profileURL
+	var avatarURL, bannerURL string
 
-	content := fmt.Sprintf(`{"name":%q,"about":%q,"website":%q}`,
-		name, about, profileURL)
+	if profile, err := p.Client.GetProfile(ctx, n.Author.DID); err == nil {
+		if profile.DisplayName != "" {
+			name = profile.DisplayName
+		}
+		if profile.Description != "" {
+			about = profile.Description + "\n\n" + profileURL
+		}
+		avatarURL = profile.Avatar
+		bannerURL = profile.Banner
+	} else {
+		slog.Debug("bsky poller: could not fetch full profile, using minimal metadata",
+			"author", n.Author.Handle, "error", err)
+	}
+
+	parts := []string{
+		fmt.Sprintf(`"name":%q`, name),
+		fmt.Sprintf(`"about":%q`, about),
+	}
+	if avatarURL != "" {
+		parts = append(parts, fmt.Sprintf(`"picture":%q`, avatarURL))
+	}
+	if bannerURL != "" {
+		parts = append(parts, fmt.Sprintf(`"banner":%q`, bannerURL))
+	}
+	parts = append(parts, fmt.Sprintf(`"website":%q`, profileURL))
+	content := "{" + strings.Join(parts, ",") + "}"
 
 	meta := &nostr.Event{
 		Kind:      0,

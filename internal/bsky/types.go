@@ -138,4 +138,7 @@ type Profile struct {
 	DID         string `json:"did"`
 	Handle      string `json:"handle"`
 	DisplayName string `json:"displayName"`
+	Description string `json:"description"`
+	Avatar      string `json:"avatar"`
+	Banner      string `json:"banner"`
 }

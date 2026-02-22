@@ -12,7 +12,9 @@ import (
 type FollowStore interface {
 	AddFollow(followerID, followedID string) error
 	RemoveFollow(followerID, followedID string) error
-	GetFollowing(followerID string) ([]string, error)
+	// GetAPFollowing returns only ActivityPub follows (http-prefixed URLs),
+	// excluding Bluesky entries so they don't trigger spurious AP Undo Follow activities.
+	GetAPFollowing(followerID string) ([]string, error)
 	GetActorForKey(pubkey string) (string, bool)
 }
 
@@ -155,8 +157,8 @@ func (h *Handler) handleKind3(ctx context.Context, event *nostr.Event) {
 		}
 	}
 
-	// Get the AP actors we were already following.
-	current, err := h.Store.GetFollowing(localActorURL)
+	// Get the AP actors we were already following (excludes Bluesky entries).
+	current, err := h.Store.GetAPFollowing(localActorURL)
 	if err != nil {
 		slog.Warn("kind3: failed to load current AP follows", "error", err)
 		return

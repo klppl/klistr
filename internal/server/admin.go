@@ -1,10 +1,10 @@
 package server
 
 import (
+	"crypto/subtle"
 	"fmt"
-	"net/http"
-
 	"log/slog"
+	"net/http"
 )
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ import (
 func (s *Server) adminAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pass, ok := r.BasicAuth()
-		if !ok || pass != s.cfg.WebAdminPassword {
+		if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.WebAdminPassword)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="klistr admin"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -355,7 +355,47 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="followers-list" id="followers-list"><span class="empty">loading…</span></div>
 </div>
 
-<!-- Row 4: Import Following -->
+<!-- Row 4: Following -->
+<div class="card-full">
+  <h2>Following</h2>
+  <div class="grid2">
+
+    <!-- Fediverse column -->
+    <div>
+      <div style="font-size:12px;color:var(--blue);font-weight:600;margin-bottom:8px">🌐 Fediverse</div>
+      <div class="followers-list" id="fediverse-following-list" style="max-height:200px;margin-bottom:10px">
+        <span class="empty">loading…</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="fediverse-follow-input"
+          placeholder="alice@mastodon.social"
+          style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:12px;font-family:monospace"
+          onkeydown="if(event.key==='Enter')addFollow('fediverse')">
+        <button class="btn btn-surface" style="padding:6px 14px;font-size:12px" onclick="addFollow('fediverse')">Follow</button>
+      </div>
+      <div class="action-msg" id="fediverse-follow-msg"></div>
+    </div>
+
+    <!-- Bluesky column -->
+    <div>
+      <div style="font-size:12px;color:var(--sky);font-weight:600;margin-bottom:8px">☁ Bluesky</div>
+      <div class="followers-list" id="bsky-following-list" style="max-height:200px;margin-bottom:10px">
+        <span class="empty">loading…</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="bsky-follow-input"
+          placeholder="user.bsky.social"
+          style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:12px;font-family:monospace"
+          onkeydown="if(event.key==='Enter')addFollow('bsky')">
+        <button class="btn btn-surface" id="btn-bsky-follow-add" style="padding:6px 14px;font-size:12px" onclick="addFollow('bsky')">Follow</button>
+      </div>
+      <div class="action-msg" id="bsky-follow-msg"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Row 5: Import Following -->
 <div class="card-full">
   <h2>Import Fediverse Following</h2>
   <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
@@ -691,6 +731,103 @@ function refreshAll() {
   toast('Refreshed');
 }
 
+// ── Following management ─────────────────────────────────────────────────────
+async function loadFollowing() {
+  try {
+    const r = await fetch('/web/api/following');
+    const d = await r.json();
+
+    // Fediverse list
+    const fedEl = document.getElementById('fediverse-following-list');
+    fedEl.innerHTML = '';
+    if (!d.fediverse || d.fediverse.length === 0) {
+      fedEl.innerHTML = '<span class="empty">Not following anyone on Fediverse yet.</span>';
+    } else {
+      d.fediverse.forEach(item => {
+        const div = document.createElement('div'); div.className = 'follower';
+        div.innerHTML =
+          '<span class="f-handle">'+esc(item.handle)+'</span>'+
+          '<button style="background:none;border:none;cursor:pointer;color:var(--red);font-size:14px;opacity:.7;padding:0 4px" '+
+            'title="Unfollow" onclick="removeFollow(\''+esc(item.actor)+'\',\'fediverse\')">✕</button>';
+        fedEl.appendChild(div);
+      });
+    }
+
+    // Bluesky list
+    const bskyEl = document.getElementById('bsky-following-list');
+    bskyEl.innerHTML = '';
+    if (!bskyEnabled) {
+      bskyEl.innerHTML = '<span class="empty">Bluesky not configured.</span>';
+      document.getElementById('bsky-follow-input').disabled = true;
+      document.getElementById('btn-bsky-follow-add').disabled = true;
+    } else if (!d.bluesky || d.bluesky.length === 0) {
+      bskyEl.innerHTML = '<span class="empty">Not following anyone on Bluesky yet.</span>';
+    } else {
+      d.bluesky.forEach(item => {
+        const displayHandle = item.handle || item.did;
+        const removeKey = item.handle || item.did;
+        const div = document.createElement('div'); div.className = 'follower';
+        div.innerHTML =
+          '<span class="f-handle">'+esc(displayHandle)+'</span>'+
+          '<button style="background:none;border:none;cursor:pointer;color:var(--red);font-size:14px;opacity:.7;padding:0 4px" '+
+            'title="Unfollow" onclick="removeFollow(\''+esc(removeKey)+'\',\'bsky\')">✕</button>';
+        bskyEl.appendChild(div);
+      });
+    }
+  } catch(e) {
+    console.warn('loadFollowing failed', e);
+  }
+}
+
+async function addFollow(bridge) {
+  const inputId = bridge === 'fediverse' ? 'fediverse-follow-input' : 'bsky-follow-input';
+  const msgId   = bridge === 'fediverse' ? 'fediverse-follow-msg'   : 'bsky-follow-msg';
+  const handle = document.getElementById(inputId).value.trim();
+  if (!handle) { toast('Enter a handle first'); return; }
+
+  const msgEl = document.getElementById(msgId);
+  msgEl.textContent = 'Following…';
+  try {
+    const r = await fetch('/web/api/follow', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({handle, bridge}),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      document.getElementById(inputId).value = '';
+      msgEl.textContent = '';
+      toast('Now following ' + handle);
+      loadFollowing();
+    } else {
+      msgEl.textContent = 'Error: ' + (d.error || r.statusText);
+    }
+  } catch(e) {
+    msgEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function removeFollow(handle, bridge) {
+  if (!confirm('Unfollow ' + handle + '?')) return;
+
+  try {
+    const r = await fetch('/web/api/unfollow', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({handle, bridge}),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      toast('Unfollowed ' + handle);
+      loadFollowing();
+    } else {
+      toast('Error: ' + (d.error || r.statusText));
+    }
+  } catch(e) {
+    toast('Error: ' + e.message);
+  }
+}
+
 // ── Import Following ─────────────────────────────────────────────────────────
 async function importFollowing() {
   const raw = document.getElementById('import-textarea').value;
@@ -760,8 +897,9 @@ async function importFollowing() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
-Promise.all([loadStatus(), loadStats(), loadFollowers()])
-  .catch(e => console.error('init failed', e));
+// loadFollowing depends on bskyEnabled (set by loadStatus), so chain it.
+loadStatus().then(() => loadFollowing()).catch(e => console.error('loadFollowing failed', e));
+Promise.all([loadStats(), loadFollowers()]).catch(e => console.error('init failed', e));
 
 setInterval(loadStats,    30000);
 setInterval(updateUptime, 10000);

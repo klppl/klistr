@@ -169,11 +169,13 @@ func main() {
 
 	// ─── Bluesky bridge (optional) ────────────────────────────────────────────
 	var bskyTrigger chan struct{}
+	var activeBskyClient *bsky.Client
 	if cfg.BskyEnabled() {
 		bskyClient := bsky.NewClient(cfg.BskyIdentifier, cfg.BskyAppPassword)
 		if err := bskyClient.Authenticate(ctx); err != nil {
 			slog.Warn("bsky auth failed, bridge disabled", "error", err)
 		} else {
+			activeBskyClient = bskyClient
 			nostrHandler.BskyPoster = &bsky.Poster{
 				Client:          bskyClient,
 				Store:           store,
@@ -217,6 +219,9 @@ func main() {
 	}
 	if bskyTrigger != nil {
 		srv.SetBskyTrigger(bskyTrigger)
+	}
+	if activeBskyClient != nil {
+		srv.SetBskyClient(activeBskyClient)
 	}
 	srv.SetResyncTrigger(resyncTrigger)
 	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})

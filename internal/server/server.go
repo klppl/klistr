@@ -37,6 +37,10 @@ type ActorResolver interface {
 	PublicKey(apActorURL string) (string, error)
 }
 
+// maxConcurrentActivities is the maximum number of inbox activities processed
+// concurrently. Activities arriving beyond this limit receive a 503 response.
+const maxConcurrentActivities = 50
+
 // Server is the main HTTP server for klistr.
 type Server struct {
 	cfg           *config.Config
@@ -47,12 +51,14 @@ type Server struct {
 	actorKeyStore ActorKeyStore
 	actorResolver ActorResolver
 	startedAt     time.Time
+	inboxSem      chan struct{} // bounded concurrency for inbox processing
 
 	// Optional — set before Start() is called.
 	logBroadcaster  *LogBroadcaster
 	bskyTrigger     chan struct{}
 	resyncTrigger   chan struct{}
 	followPublisher FollowPublisher
+	bskyClient      BskyClient
 }
 
 // New creates a new Server.
@@ -65,6 +71,7 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 		actorKeyStore: actorKeyStore,
 		actorResolver: actorResolver,
 		startedAt:     time.Now(),
+		inboxSem:      make(chan struct{}, maxConcurrentActivities),
 	}
 	s.router = s.buildRouter()
 	return s
@@ -83,6 +90,10 @@ func (s *Server) SetFollowPublisher(fp FollowPublisher) { s.followPublisher = fp
 // SetResyncTrigger attaches a channel that, when sent to, triggers an immediate
 // account profile resync. Nil disables the Re-sync Accounts button.
 func (s *Server) SetResyncTrigger(ch chan struct{}) { s.resyncTrigger = ch }
+
+// SetBskyClient attaches the Bluesky client used for individual follow management.
+// Nil disables the Bluesky follow/unfollow endpoints.
+func (s *Server) SetBskyClient(c BskyClient) { s.bskyClient = c }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -172,6 +183,9 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/api/sync-bsky", s.handleAdminSyncBsky)
 			r.Post("/api/resync-accounts", s.handleAdminResyncAccounts)
 			r.Post("/api/import-following", s.handleImportFollowing)
+			r.Get("/api/following", s.handleGetFollowing)
+			r.Post("/api/follow", s.handleAddFollow)
+			r.Post("/api/unfollow", s.handleRemoveFollow)
 		})
 	}
 
@@ -322,9 +336,18 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle the activity asynchronously.
+	// Handle the activity asynchronously within a bounded concurrency limit.
+	select {
+	case s.inboxSem <- struct{}{}:
+	default:
+		slog.Warn("inbox overloaded, dropping activity", "remote", r.RemoteAddr)
+		http.Error(w, "too many requests", http.StatusServiceUnavailable)
+		return
+	}
 	go func() {
-		ctx := context.Background()
+		defer func() { <-s.inboxSem }()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		if err := s.apHandler.HandleActivity(ctx, json.RawMessage(body)); err != nil {
 			slog.Warn("failed to handle activity", "error", err)
 		}

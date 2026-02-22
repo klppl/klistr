@@ -251,6 +251,58 @@ func (s *Store) GetFollowing(followerID string) ([]string, error) {
 	return result, rows.Err()
 }
 
+// GetAPFollowing returns only ActivityPub followed IDs (those starting with "http")
+// for a given follower ID. Bluesky entries (prefixed "bsky:") are excluded.
+func (s *Store) GetAPFollowing(followerID string) ([]string, error) {
+	var q string
+	if s.driver == "sqlite" {
+		q = `SELECT followed_id FROM follows WHERE follower_id = ? AND followed_id LIKE 'http%'`
+	} else {
+		q = `SELECT followed_id FROM follows WHERE follower_id = $1 AND followed_id LIKE 'http%'`
+	}
+	rows, err := s.db.Query(q, followerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
+// GetBskyFollowing returns only Bluesky followed IDs (those starting with "bsky:")
+// for a given follower ID.
+func (s *Store) GetBskyFollowing(followerID string) ([]string, error) {
+	var q string
+	if s.driver == "sqlite" {
+		q = `SELECT followed_id FROM follows WHERE follower_id = ? AND followed_id LIKE 'bsky:%'`
+	} else {
+		q = `SELECT followed_id FROM follows WHERE follower_id = $1 AND followed_id LIKE 'bsky:%'`
+	}
+	rows, err := s.db.Query(q, followerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
 // ─── Actor keys ───────────────────────────────────────────────────────────────
 
 // StoreActorKey persists a derived Nostr pubkey → AP actor URL mapping.

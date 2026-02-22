@@ -95,6 +95,30 @@ func (c *Client) ListNotifications(ctx context.Context, cursor string) (*ListNot
 	return &resp, nil
 }
 
+// FollowActor creates a follow record for the given DID via app.bsky.graph.follow.
+// Returns the rkey of the created record (used for later deletion).
+func (c *Client) FollowActor(ctx context.Context, did string) (string, error) {
+	req := CreateRecordRequest{
+		Repo:       c.DID(),
+		Collection: "app.bsky.graph.follow",
+		Record: map[string]interface{}{
+			"$type":     "app.bsky.graph.follow",
+			"subject":   did,
+			"createdAt": time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	resp, err := c.CreateRecord(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("bsky followActor: %w", err)
+	}
+	// URI format: at://did:plc:xxx/app.bsky.graph.follow/<rkey>
+	parts := strings.Split(resp.URI, "/")
+	if len(parts) == 0 {
+		return "", fmt.Errorf("bsky followActor: unexpected URI format: %s", resp.URI)
+	}
+	return parts[len(parts)-1], nil
+}
+
 // GetProfile fetches a profile via app.bsky.actor.getProfile.
 func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error) {
 	params := url.Values{}
@@ -108,10 +132,20 @@ func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error)
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-// authedPost performs an authenticated XRPC POST, re-authenticating on 401.
+// isAuthError returns true for errors that indicate a stale/expired token.
+// Bluesky may return HTTP 401 or HTTP 400 with error=ExpiredToken.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "401") || strings.Contains(s, "ExpiredToken")
+}
+
+// authedPost performs an authenticated XRPC POST, re-authenticating on auth errors.
 func (c *Client) authedPost(ctx context.Context, method string, body, out interface{}) error {
 	err := c.xrpcPostWithAuth(ctx, method, body, out)
-	if err != nil && strings.Contains(err.Error(), "401") {
+	if isAuthError(err) {
 		slog.Warn("bsky token expired, re-authenticating")
 		if authErr := c.Authenticate(ctx); authErr != nil {
 			return fmt.Errorf("re-authenticate: %w", authErr)
@@ -121,10 +155,10 @@ func (c *Client) authedPost(ctx context.Context, method string, body, out interf
 	return err
 }
 
-// authedGet performs an authenticated XRPC GET, re-authenticating on 401.
+// authedGet performs an authenticated XRPC GET, re-authenticating on auth errors.
 func (c *Client) authedGet(ctx context.Context, method string, params url.Values, out interface{}) error {
 	err := c.xrpcGetWithAuth(ctx, method, params, out)
-	if err != nil && strings.Contains(err.Error(), "401") {
+	if isAuthError(err) {
 		slog.Warn("bsky token expired, re-authenticating")
 		if authErr := c.Authenticate(ctx); authErr != nil {
 			return fmt.Errorf("re-authenticate: %w", authErr)

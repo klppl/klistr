@@ -2,9 +2,9 @@ package bsky
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -293,18 +293,25 @@ func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) 
 			"author", n.Author.Handle, "error", err)
 	}
 
-	parts := []string{
-		fmt.Sprintf(`"name":%q`, name),
-		fmt.Sprintf(`"about":%q`, about),
+	profileMeta := struct {
+		Name    string `json:"name"`
+		About   string `json:"about"`
+		Picture string `json:"picture,omitempty"`
+		Banner  string `json:"banner,omitempty"`
+		Website string `json:"website"`
+	}{
+		Name:    name,
+		About:   about,
+		Picture: avatarURL,
+		Banner:  bannerURL,
+		Website: profileURL,
 	}
-	if avatarURL != "" {
-		parts = append(parts, fmt.Sprintf(`"picture":%q`, avatarURL))
+	metaBytes, err := json.Marshal(profileMeta)
+	if err != nil {
+		slog.Debug("bsky poller: failed to marshal author profile metadata", "author", n.Author.Handle, "error", err)
+		return
 	}
-	if bannerURL != "" {
-		parts = append(parts, fmt.Sprintf(`"banner":%q`, bannerURL))
-	}
-	parts = append(parts, fmt.Sprintf(`"website":%q`, profileURL))
-	content := "{" + strings.Join(parts, ",") + "}"
+	content := string(metaBytes)
 
 	meta := &nostr.Event{
 		Kind:      0,

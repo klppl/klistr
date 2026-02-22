@@ -24,15 +24,26 @@ var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
-// objectCache is a simple in-memory cache for fetched AP objects.
-var objectCache sync.Map // url → json.RawMessage
+const objectCacheTTL = time.Hour
+
+type cacheEntry struct {
+	obj     map[string]interface{}
+	expires time.Time
+}
+
+// objectCache is a TTL-bounded in-memory cache for fetched AP objects.
+var objectCache sync.Map // url → cacheEntry
 
 // FetchObject fetches an ActivityPub object from a remote URL.
 // Returns the raw JSON or an error. Results are cached.
 func FetchObject(ctx context.Context, rawURL string) (map[string]interface{}, error) {
-	// Check cache first.
+	// Check cache first (skip if expired).
 	if cached, ok := objectCache.Load(rawURL); ok {
-		return cached.(map[string]interface{}), nil
+		entry := cached.(cacheEntry)
+		if time.Now().Before(entry.expires) {
+			return entry.obj, nil
+		}
+		objectCache.Delete(rawURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
@@ -60,7 +71,7 @@ func FetchObject(ctx context.Context, rawURL string) (map[string]interface{}, er
 		return nil, fmt.Errorf("decode response from %s: %w", rawURL, err)
 	}
 
-	objectCache.Store(rawURL, obj)
+	objectCache.Store(rawURL, cacheEntry{obj: obj, expires: time.Now().Add(objectCacheTTL)})
 	return obj, nil
 }
 
@@ -287,16 +298,22 @@ func mapToNote(m map[string]interface{}) *Note {
 		note.Sensitive = sens
 	}
 
-	if to, ok := m["to"].([]interface{}); ok {
-		for _, v := range to {
-			if s, ok := v.(string); ok {
+	switch v := m["to"].(type) {
+	case string:
+		note.To = append(note.To, v)
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
 				note.To = append(note.To, s)
 			}
 		}
 	}
-	if cc, ok := m["cc"].([]interface{}); ok {
-		for _, v := range cc {
-			if s, ok := v.(string); ok {
+	switch v := m["cc"].(type) {
+	case string:
+		note.CC = append(note.CC, v)
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
 				note.CC = append(note.CC, s)
 			}
 		}

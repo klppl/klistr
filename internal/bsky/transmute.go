@@ -5,9 +5,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -169,23 +169,27 @@ func buildFacets(text string) []Facet {
 
 // truncateGraphemes truncates s to at most n Unicode grapheme clusters.
 // Returns the (possibly truncated) string and whether truncation occurred.
-// This is a best-effort approximation using rune count (close enough for ASCII/Latin).
 func truncateGraphemes(s string, n int) (string, bool) {
+	gr := uniseg.NewGraphemes(s)
 	count := 0
-	for i := range s {
-		if count >= n {
-			return s[:i], true
-		}
-		if utf8.RuneStart(s[i]) {
-			count++
+	var endPos int
+	for gr.Next() {
+		count++
+		_, endPos = gr.Positions()
+		if count == n {
+			// Check if there is remaining text beyond the nth grapheme.
+			if gr.Next() {
+				return s[:endPos], true
+			}
+			return s, false
 		}
 	}
 	return s, false
 }
 
-// graphemeCount returns the grapheme count (rune-based approximation) of s.
+// graphemeCount returns the number of Unicode grapheme clusters in s.
 func graphemeCount(s string) int {
-	return utf8.RuneCountInString(s)
+	return uniseg.GraphemeClusterCount(s)
 }
 
 // ─── Bluesky → Nostr ─────────────────────────────────────────────────────────

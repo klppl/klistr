@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -92,11 +93,21 @@ func (rp *RelayPool) Start(ctx context.Context) {
 // Publisher publishes Nostr events to write relays.
 type Publisher struct {
 	writeRelays []string
+	pool        *nostr.SimplePool
+	poolOnce    sync.Once
 }
 
 // NewPublisher creates a new Publisher.
 func NewPublisher(writeRelays []string) *Publisher {
 	return &Publisher{writeRelays: writeRelays}
+}
+
+// getPool returns the shared, lazily-initialised relay pool.
+func (p *Publisher) getPool() *nostr.SimplePool {
+	p.poolOnce.Do(func() {
+		p.pool = nostr.NewSimplePool(context.Background())
+	})
+	return p.pool
 }
 
 // Publish publishes an event to all configured write relays.
@@ -106,8 +117,7 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 		return nil
 	}
 
-	pool := nostr.NewSimplePool(ctx)
-	results := pool.PublishMany(ctx, p.writeRelays, *event)
+	results := p.getPool().PublishMany(ctx, p.writeRelays, *event)
 
 	var published, failed int
 	for result := range results {

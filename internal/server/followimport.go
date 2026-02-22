@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -86,38 +87,97 @@ func (s *Server) handleImportFollowing(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
-	// ── Step 2: Fetch existing kind-3 from relay to preserve current follows ─
-	existingPubkeys := s.fetchExistingKind3(r.Context())
+	// ── Step 2: Collect newly resolved pubkeys ────────────────────────────────
+	var addPubkeys []string
+	for _, res := range results {
+		if res.Status == "ok" && res.Actor != "" {
+			if pk, err := s.actorResolver.PublicKey(res.Actor); err == nil {
+				addPubkeys = append(addPubkeys, pk)
+			}
+		}
+	}
+
+	// ── Step 3: Merge and publish kind-3 ─────────────────────────────────────
+	totalFollows, fetchedExisting, err := s.mergeAndPublishKind3(r.Context(), addPubkeys, nil)
+	var publishErr string
+	published := err == nil
+	if err != nil {
+		publishErr = err.Error()
+		slog.Warn("import following: publish failed", "error", err)
+	} else {
+		slog.Info("import following: published kind-3",
+			"total_follows", totalFollows,
+			"new_handles", len(handles))
+	}
+
+	type response struct {
+		Results         []importResult `json:"results"`
+		Published       bool           `json:"published"`
+		TotalFollows    int            `json:"total_follows"`
+		FetchedExisting bool           `json:"fetched_existing"`
+		Error           string         `json:"error,omitempty"`
+	}
+	jsonResponse(w, response{
+		Results:         results,
+		Published:       published,
+		TotalFollows:    totalFollows,
+		FetchedExisting: fetchedExisting,
+		Error:           publishErr,
+	}, http.StatusOK)
+}
+
+// mergeAndPublishKind3 builds a new kind-3 contact list by:
+//  1. Fetching the user's existing kind-3 from relays (to preserve current follows).
+//  2. Including all AP- and Bluesky-bridged follows tracked in the local DB.
+//  3. Adding addPubkeys and removing removePubkeys.
+//  4. Signing and publishing the resulting kind-3 event.
+//
+// Returns the total number of follows in the published event, whether an
+// existing kind-3 was found on the relay, and any publish error.
+func (s *Server) mergeAndPublishKind3(ctx context.Context, addPubkeys, removePubkeys []string) (int, bool, error) {
+	if s.followPublisher == nil {
+		return 0, false, fmt.Errorf("follow publisher not configured")
+	}
+
+	// Fetch existing kind-3 from relay (preserves non-bridge follows).
+	existingPubkeys := s.fetchExistingKind3(ctx)
 	fetchedExisting := len(existingPubkeys) > 0
 
-	// ── Step 3: Merge existing + AP-bridged + newly resolved pubkeys ──────────
 	allPubkeys := make(map[string]struct{})
-
-	// Preserve all current Nostr follows (regular + AP-bridged).
 	for pk := range existingPubkeys {
 		allPubkeys[pk] = struct{}{}
 	}
 
-	// Include AP-bridged follows tracked in the local DB.
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
-	if following, err := s.store.GetFollowing(localActorURL); err == nil {
-		for _, apURL := range following {
+
+	// Include AP-bridged follows from DB.
+	if apFollows, err := s.store.GetAPFollowing(localActorURL); err == nil {
+		for _, apURL := range apFollows {
 			if pk, err := s.actorResolver.PublicKey(apURL); err == nil {
 				allPubkeys[pk] = struct{}{}
 			}
 		}
 	}
 
-	// Add newly resolved pubkeys.
-	for _, res := range results {
-		if res.Status == "ok" && res.Actor != "" {
-			if pk, err := s.actorResolver.PublicKey(res.Actor); err == nil {
+	// Include Bluesky-bridged follows from DB.
+	if bskyFollows, err := s.store.GetBskyFollowing(localActorURL); err == nil {
+		for _, bskyID := range bskyFollows {
+			if pk, err := s.actorResolver.PublicKey(bskyID); err == nil {
 				allPubkeys[pk] = struct{}{}
 			}
 		}
 	}
 
-	// ── Step 4: Build kind-3 p-tags ───────────────────────────────────────────
+	// Add new pubkeys.
+	for _, pk := range addPubkeys {
+		allPubkeys[pk] = struct{}{}
+	}
+
+	// Remove specified pubkeys (applied last so removals win).
+	for _, pk := range removePubkeys {
+		delete(allPubkeys, pk)
+	}
+
 	tags := make(gonostr.Tags, 0, len(allPubkeys))
 	for pk := range allPubkeys {
 		tags = append(tags, gonostr.Tag{"p", pk})
@@ -130,37 +190,15 @@ func (s *Server) handleImportFollowing(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: gonostr.Now(),
 	}
 
-	// ── Step 5: Sign and publish ──────────────────────────────────────────────
-	var publishErr string
-	published := false
 	if err := s.followPublisher.SignAsUser(kind3); err != nil {
-		publishErr = "sign failed: " + err.Error()
-		slog.Warn("import following: sign failed", "error", err)
-	} else if err := s.followPublisher.Publish(r.Context(), kind3); err != nil {
-		publishErr = "publish failed: " + err.Error()
-		slog.Warn("import following: publish failed", "error", err)
-	} else {
-		published = true
-		slog.Info("import following: published kind-3",
-			"total_follows", len(tags),
-			"new_handles", len(handles),
-			"id", kind3.ID[:8])
+		return 0, fetchedExisting, fmt.Errorf("sign failed: %w", err)
+	}
+	if err := s.followPublisher.Publish(ctx, kind3); err != nil {
+		return 0, fetchedExisting, fmt.Errorf("publish failed: %w", err)
 	}
 
-	type response struct {
-		Results        []importResult `json:"results"`
-		Published      bool           `json:"published"`
-		TotalFollows   int            `json:"total_follows"`
-		FetchedExisting bool          `json:"fetched_existing"`
-		Error          string         `json:"error,omitempty"`
-	}
-	jsonResponse(w, response{
-		Results:         results,
-		Published:       published,
-		TotalFollows:    len(tags),
-		FetchedExisting: fetchedExisting,
-		Error:           publishErr,
-	}, http.StatusOK)
+	slog.Info("mergeAndPublishKind3: published kind-3", "total_follows", len(tags), "id", kind3.ID[:8])
+	return len(tags), fetchedExisting, nil
 }
 
 // resolveFollowHandle WebFingers a handle, derives its Nostr pubkey, and stores

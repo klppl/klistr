@@ -1,6 +1,7 @@
 package ap
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"regexp"
@@ -370,72 +371,17 @@ func IsProxyEvent(event *nostr.Event) bool {
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 type nostrMeta struct {
-	Name    string
-	About   string
-	Picture string
-	Banner  string
-	Fields  [][]string
+	Name    string     `json:"name"`
+	About   string     `json:"about"`
+	Picture string     `json:"picture"`
+	Banner  string     `json:"banner"`
+	Fields  [][]string `json:"fields"`
 }
 
 func parseMetadata(content string) nostrMeta {
-	// Simple JSON parse for common fields.
-	// In production this would use a proper JSON parser.
 	var meta nostrMeta
-	// Use basic string extraction for robustness.
-	meta.Name = extractJSONString(content, "name")
-	meta.About = extractJSONString(content, "about")
-	meta.Picture = extractJSONString(content, "picture")
-	meta.Banner = extractJSONString(content, "banner")
+	_ = json.Unmarshal([]byte(content), &meta)
 	return meta
-}
-
-func extractJSONString(json, key string) string {
-	// Very simple extractor — good enough for our use case.
-	// A real implementation would use encoding/json.
-	start := strings.Index(json, `"`+key+`"`)
-	if start == -1 {
-		return ""
-	}
-	rest := json[start+len(key)+2:]
-	// Skip : and whitespace
-	colon := strings.IndexByte(rest, ':')
-	if colon == -1 {
-		return ""
-	}
-	rest = strings.TrimSpace(rest[colon+1:])
-	if len(rest) == 0 || rest[0] != '"' {
-		return ""
-	}
-	rest = rest[1:]
-	var buf strings.Builder
-	escaped := false
-	for _, c := range rest {
-		if escaped {
-			switch c {
-			case 'n':
-				buf.WriteByte('\n')
-			case 't':
-				buf.WriteByte('\t')
-			case '"':
-				buf.WriteByte('"')
-			case '\\':
-				buf.WriteByte('\\')
-			default:
-				buf.WriteRune(c)
-			}
-			escaped = false
-			continue
-		}
-		if c == '\\' {
-			escaped = true
-			continue
-		}
-		if c == '"' {
-			break
-		}
-		buf.WriteRune(c)
-	}
-	return buf.String()
 }
 
 func linkifyText(text string) string {

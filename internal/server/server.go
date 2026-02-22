@@ -186,6 +186,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/api/following", s.handleGetFollowing)
 			r.Post("/api/follow", s.handleAddFollow)
 			r.Post("/api/unfollow", s.handleRemoveFollow)
+			r.Post("/api/resync-follows", s.handleResyncFollowProfiles)
 		})
 	}
 

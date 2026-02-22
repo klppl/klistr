@@ -15,10 +15,13 @@ import (
 	"github.com/klppl/klistr/internal/ap"
 )
 
-// FollowPublisher can sign and publish a Nostr event as the local user.
+// FollowPublisher can sign and publish Nostr events.
 // Implemented by a thin adapter in main.go wrapping the Signer + Publisher.
 type FollowPublisher interface {
 	SignAsUser(event *gonostr.Event) error
+	// Sign derives a deterministic key for actorID and signs the event with it.
+	// Used to give bridged actors (AP or Bluesky) a consistent pseudonymous identity.
+	Sign(event *gonostr.Event, actorID string) error
 	Publish(ctx context.Context, event *gonostr.Event) error
 }
 
@@ -162,7 +165,8 @@ func (s *Server) mergeAndPublishKind3(ctx context.Context, addPubkeys, removePub
 	// Include Bluesky-bridged follows from DB.
 	if bskyFollows, err := s.store.GetBskyFollowing(localActorURL); err == nil {
 		for _, bskyID := range bskyFollows {
-			if pk, err := s.actorResolver.PublicKey(bskyID); err == nil {
+			did := strings.TrimPrefix(bskyID, "bsky:")
+			if pk, err := s.actorResolver.PublicKey(did); err == nil {
 				allPubkeys[pk] = struct{}{}
 			}
 		}

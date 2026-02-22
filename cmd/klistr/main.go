@@ -41,6 +41,9 @@ type followPublisherAdapter struct {
 func (a *followPublisherAdapter) SignAsUser(event *gonostr.Event) error {
 	return a.signer.SignAsUser(event)
 }
+func (a *followPublisherAdapter) Sign(event *gonostr.Event, actorID string) error {
+	return a.signer.Sign(event, actorID)
+}
 func (a *followPublisherAdapter) Publish(ctx context.Context, event *gonostr.Event) error {
 	return a.publisher.Publish(ctx, event)
 }

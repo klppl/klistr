@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
+	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/klppl/klistr/internal/ap"
 	"github.com/klppl/klistr/internal/bsky"
 )
@@ -252,18 +254,20 @@ func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string
 	// Persist handle for display in the following list.
 	_ = s.store.SetKV("bsky_follow_handle_"+did, resolvedHandle)
 
-	pubkey, err := s.actorResolver.PublicKey("bsky:" + did)
+	// Key derivation: use plain DID (not "bsky:"+did) to match the key the
+	// poller uses when signing kind-1 replies and kind-0 profiles for this author.
+	pubkey, err := s.actorResolver.PublicKey(did)
 	if err != nil {
 		return err
-	}
-
-	if err := s.actorKeyStore.StoreActorKey(pubkey, "bsky:"+did); err != nil {
-		slog.Warn("add bsky follow: failed to store actor key", "error", err)
 	}
 
 	if err := s.store.AddFollow(localActorURL, "bsky:"+did); err != nil {
 		slog.Warn("add bsky follow: failed to store follow in db", "error", err)
 	}
+
+	// Publish a kind-0 profile event for the followed account so Nostr clients
+	// display their name, avatar, bio, and a link back to their Bluesky profile.
+	s.publishBskyProfileKind0(ctx, profile)
 
 	_, _, err = s.mergeAndPublishKind3(ctx, []string{pubkey}, nil)
 	if err != nil {
@@ -299,7 +303,8 @@ func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorUR
 		}
 	}
 
-	pubkey, err := s.actorResolver.PublicKey("bsky:" + did)
+	// Use plain DID for key derivation (matches poller and addBskyFollow).
+	pubkey, err := s.actorResolver.PublicKey(did)
 	if err != nil {
 		return err
 	}
@@ -316,6 +321,125 @@ func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorUR
 
 	slog.Info("remove bsky follow: unfollowed and published kind-3", "did", did)
 	return nil
+}
+
+// publishBskyProfileKind0 publishes a Nostr kind-0 metadata event for a Bluesky
+// profile, signed with the deterministic derived key for that account's DID.
+// This allows Nostr clients to show the account's name, avatar, bio, and a link
+// back to their Bluesky profile. Mirrors the logic in bsky.Poller.publishBskyAuthorProfile.
+func (s *Server) publishBskyProfileKind0(ctx context.Context, profile *bsky.Profile) {
+	if s.followPublisher == nil || profile.DID == "" || profile.Handle == "" {
+		return
+	}
+
+	profileURL := "https://bsky.app/profile/" + profile.Handle
+	name := profile.DisplayName
+	if name == "" {
+		name = profile.Handle
+	}
+	about := profileURL
+	if profile.Description != "" {
+		about = profile.Description + "\n\n" + profileURL
+	}
+
+	meta := struct {
+		Name    string `json:"name"`
+		About   string `json:"about"`
+		Picture string `json:"picture,omitempty"`
+		Banner  string `json:"banner,omitempty"`
+		Website string `json:"website"`
+	}{
+		Name:    name,
+		About:   about,
+		Picture: profile.Avatar,
+		Banner:  profile.Banner,
+		Website: profileURL,
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		slog.Debug("publishBskyProfileKind0: marshal failed", "handle", profile.Handle, "error", err)
+		return
+	}
+
+	event := &gonostr.Event{
+		Kind:      0,
+		Content:   string(metaBytes),
+		CreatedAt: gonostr.Now(),
+	}
+	// Sign with derived key for DID — same derivation the poller uses.
+	if err := s.followPublisher.Sign(event, profile.DID); err != nil {
+		slog.Debug("publishBskyProfileKind0: sign failed", "handle", profile.Handle, "error", err)
+		return
+	}
+	if err := s.followPublisher.Publish(ctx, event); err != nil {
+		slog.Debug("publishBskyProfileKind0: publish failed", "handle", profile.Handle, "error", err)
+		return
+	}
+	slog.Info("publishBskyProfileKind0: published kind-0", "handle", profile.Handle, "did", profile.DID)
+}
+
+// handleResyncFollowProfiles re-fetches and re-publishes kind-0 metadata for all
+// followed accounts on both bridges.
+//
+// POST /web/api/resync-follows
+//
+// Bluesky: calls GetProfile for every followed DID and re-publishes kind-0.
+// Fediverse: fires the existing AccountResyncer trigger so all AP actor profiles
+// are re-fetched and re-published in the background (same as "Re-sync Accounts").
+func (s *Server) handleResyncFollowProfiles(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+
+	var bskySynced, bskyErrors int
+
+	// Bluesky: re-publish kind-0 for each followed account.
+	if s.bskyClient != nil && s.followPublisher != nil {
+		if bskyFollows, err := s.store.GetBskyFollowing(localActorURL); err == nil {
+			for _, bskyID := range bskyFollows {
+				did := strings.TrimPrefix(bskyID, "bsky:")
+				profile, err := s.bskyClient.GetProfile(ctx, did)
+				if err != nil {
+					slog.Warn("resync-follows: failed to fetch bsky profile", "did", did, "error", err)
+					bskyErrors++
+					continue
+				}
+				s.publishBskyProfileKind0(ctx, profile)
+				bskySynced++
+			}
+		}
+	}
+
+	// Fediverse: trigger the existing AccountResyncer (non-blocking).
+	fedQueued := false
+	if s.resyncTrigger != nil {
+		select {
+		case s.resyncTrigger <- struct{}{}:
+			fedQueued = true
+		default:
+			fedQueued = true // already queued
+		}
+	}
+
+	parts := []string{}
+	if s.bskyClient != nil {
+		part := fmt.Sprintf("Bluesky: %d profile(s) re-synced", bskySynced)
+		if bskyErrors > 0 {
+			part += fmt.Sprintf(" (%d error(s))", bskyErrors)
+		}
+		parts = append(parts, part)
+	}
+	if fedQueued {
+		parts = append(parts, "Fediverse profile resync queued")
+	}
+	msg := strings.Join(parts, ". ")
+	if msg == "" {
+		msg = "Nothing to resync."
+	} else {
+		msg += "."
+	}
+
+	slog.Info("resync-follows: done", "bsky_synced", bskySynced, "bsky_errors", bskyErrors, "fediverse_queued", fedQueued)
+	jsonResponse(w, map[string]string{"message": msg}, http.StatusOK)
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────

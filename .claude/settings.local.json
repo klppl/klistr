@@ -17,7 +17,8 @@
       "Bash(wc:*)",
       "WebFetch(domain:docs.bsky.app)",
       "Bash(go vet:*)",
-      "Bash(echo exit:$?:*)"
+      "Bash(echo exit:$?:*)",
+      "Bash(sudo docker compose ps 2>&1 && sudo docker compose logs --tail=60 klistr 2>&1)"
     ]
   }
 }

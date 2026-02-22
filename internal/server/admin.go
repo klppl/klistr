@@ -393,6 +393,13 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     </div>
 
   </div>
+  <div style="display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+    <button class="btn btn-surface" id="btn-resync-follows" onclick="resyncFollowProfiles()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
+      Resync Profiles
+    </button>
+    <span style="font-size:12px;color:var(--muted)" id="resync-follows-msg"></span>
+  </div>
 </div>
 
 <!-- Row 5: Import Following -->
@@ -825,6 +832,26 @@ async function removeFollow(handle, bridge) {
     }
   } catch(e) {
     toast('Error: ' + e.message);
+  }
+}
+
+async function resyncFollowProfiles() {
+  const btn = document.getElementById('btn-resync-follows');
+  const msg = document.getElementById('resync-follows-msg');
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.textContent = 'Resyncing…';
+  msg.textContent = 'Fetching profiles…';
+  try {
+    const r = await fetch('/web/api/resync-follows', {method:'POST'});
+    const d = await r.json();
+    msg.textContent = d.message;
+    toast(d.message);
+  } catch(e) {
+    msg.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
   }
 }
 

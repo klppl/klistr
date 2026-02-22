@@ -243,6 +243,7 @@ Set `WEB_ADMIN=<password>` to enable a dashboard at `https://your-domain.com/web
 | **Configured Relays** | All relays from `NOSTR_RELAY`. |
 | **Bridge Activity** | Per-bridge stat panels — Nostr (relay count), Fediverse (followers, known actors, bridged objects), Bluesky (status, bridged objects, last sync time), Total. |
 | **Fediverse Followers** | List of everyone following you on the Fediverse, shown as `@user@domain`. |
+| **Following** | Two-column panel (Fediverse \| Bluesky) showing who you follow on each bridge, with per-row unfollow buttons and an add-handle input. Fediverse: WebFinger-resolves the handle and publishes a kind-3; ActivityPub Follow is sent automatically. Bluesky: creates the follow record on Bluesky and updates the kind-3. Bluesky panel is disabled when the bridge is not configured. |
 | **Import Fediverse Following** | Paste Fediverse handles (`user@domain.tld`, one per line). klistr resolves them via WebFinger, derives their Nostr pubkeys, fetches your current kind-3 from the relay to preserve existing follows, and publishes a merged kind-3 contact-list event. The bridge then sends ActivityPub Follow activities automatically. |
 | **Actions** | Force an immediate Bluesky notification poll; refresh stats. |
 | **Log** | Last 500 log lines from the ring buffer. Click **Refresh** to update. Filter by level (All / Debug / Info / Warn / Error). |

@@ -436,16 +436,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     </div>
 
   </div>
-  <div style="display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
-    <button class="btn btn-surface" id="btn-resync-follows" onclick="resyncFollowProfiles()">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
-      Resync Profiles
-    </button>
-    <span style="font-size:12px;color:var(--muted)" id="resync-follows-msg"></span>
-  </div>
 </div>
 
-<!-- Row 5: Import Following -->
+<!-- Row 5a: Import Fediverse Following -->
 <div class="card-full">
   <h2>Import Fediverse Following</h2>
   <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
@@ -465,24 +458,56 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div id="import-results" style="margin-top:14px"></div>
 </div>
 
-<!-- Row 5: Actions -->
+<!-- Row 5b: Import Bluesky Following (hidden when Bluesky is not configured) -->
+<div class="card-full" id="import-bsky-card" style="display:none">
+  <h2>Import Bluesky Following</h2>
+  <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
+    Paste Bluesky handles or DIDs (one per line). klistr will follow each account on Bluesky, derive their Nostr pubkey, and publish an updated kind-3 contact list — merged with your existing follows.
+  </p>
+  <textarea id="import-bsky-textarea"
+    placeholder="alice.bsky.social&#10;bob.bsky.social&#10;did:plc:xxxx"
+    style="width:100%;height:110px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;color:var(--text);font-family:'SF Mono',Consolas,monospace;font-size:12px;resize:vertical;line-height:1.6"
+  ></textarea>
+  <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+    <button class="btn btn-blue" id="btn-import-bsky" onclick="importBskyFollowing()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+      Import &amp; Publish Kind-3
+    </button>
+    <span style="font-size:12px;color:var(--muted)" id="import-bsky-status"></span>
+  </div>
+  <div id="import-bsky-results" style="margin-top:14px"></div>
+</div>
+
+<!-- Row 5c: Actions -->
 <div class="card-full">
   <h2>Actions</h2>
-  <div class="actions">
-    <button class="btn btn-blue" id="btn-bsky-sync" onclick="syncBsky()">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-      Force Bluesky Sync
-    </button>
-    <button class="btn btn-blue" id="btn-resync" onclick="resyncAccounts()">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
-      Re-sync Accounts
-    </button>
-    <button class="btn btn-surface" onclick="refreshAll()">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-      Refresh Stats
-    </button>
+  <div style="display:flex;flex-direction:column;gap:10px">
+
+    <div id="bsky-sync-row" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-blue" id="btn-bsky-sync" onclick="syncBsky()" style="min-width:178px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Sync Bluesky Now
+      </button>
+      <span style="font-size:12px;color:var(--muted)">Polls Bluesky for new notifications immediately, without waiting for the 30-second interval.</span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-surface" id="btn-refresh-profiles" onclick="refreshProfiles()" style="min-width:178px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
+        Refresh Profiles
+      </button>
+      <span style="font-size:12px;color:var(--muted)">Re-fetches profiles for all bridged accounts and republishes their Nostr kind-0 metadata. Also runs automatically every 24 hours.</span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-surface" onclick="refreshAll()" style="min-width:178px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Refresh Dashboard
+      </button>
+      <span style="font-size:12px;color:var(--muted)">Reloads the stats and follow lists shown on this page.</span>
+    </div>
+
   </div>
-  <p style="color:var(--muted);font-size:11px;margin-top:10px">Re-sync Accounts re-fetches all known Fediverse profiles and re-publishes their Nostr kind-0 metadata. Also runs automatically every 24 hours.</p>
   <div class="action-msg" id="action-msg"></div>
 </div>
 
@@ -678,11 +703,8 @@ async function loadStatus() {
   document.getElementById('bp-relays').textContent = (d.relays||[]).length;
   document.getElementById('bp-npub').textContent   = d.npub ? d.npub.slice(0,20)+'…' : '—';
 
-  if (!d.bsky_enabled) {
-    const btn = document.getElementById('btn-bsky-sync');
-    btn.disabled = true;
-    btn.title = 'Bluesky bridge not configured';
-  }
+  document.getElementById('bsky-sync-row').style.display = d.bsky_enabled ? '' : 'none';
+  document.getElementById('import-bsky-card').style.display = d.bsky_enabled ? '' : 'none';
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
@@ -799,24 +821,26 @@ async function syncBsky() {
   } catch(e) {
     document.getElementById('action-msg').textContent = 'Error: '+e.message;
   } finally {
-    btn.disabled = !bskyEnabled;
+    btn.disabled = false;
     btn.innerHTML = orig;
   }
 }
 
-async function resyncAccounts() {
-  const btn = document.getElementById('btn-resync');
+async function refreshProfiles() {
+  const btn = document.getElementById('btn-refresh-profiles');
+  const msg = document.getElementById('action-msg');
   btn.disabled = true;
   const orig = btn.innerHTML;
-  btn.textContent = 'Queuing…';
+  btn.textContent = 'Refreshing…';
+  msg.textContent = '';
   try {
-    const r = await fetch('/web/api/resync-accounts', {method:'POST'});
+    const r = await fetch('/web/api/resync-follows', {method:'POST'});
     const d = await r.json();
-    document.getElementById('action-msg').textContent = d.message;
+    msg.textContent = d.message;
     toast(d.message);
     setTimeout(loadStats, 3000);
   } catch(e) {
-    document.getElementById('action-msg').textContent = 'Error: '+e.message;
+    msg.textContent = 'Error: '+e.message;
   } finally {
     btn.disabled = false;
     btn.innerHTML = orig;
@@ -824,8 +848,8 @@ async function resyncAccounts() {
 }
 
 function refreshAll() {
-  loadStats(); loadFollowers();
-  toast('Refreshed');
+  loadStats(); loadFollowers(); loadFollowing();
+  toast('Dashboard refreshed');
 }
 
 // ── Following management ─────────────────────────────────────────────────────
@@ -925,25 +949,6 @@ async function removeFollow(handle, bridge) {
   }
 }
 
-async function resyncFollowProfiles() {
-  const btn = document.getElementById('btn-resync-follows');
-  const msg = document.getElementById('resync-follows-msg');
-  btn.disabled = true;
-  const orig = btn.innerHTML;
-  btn.textContent = 'Resyncing…';
-  msg.textContent = 'Fetching profiles…';
-  try {
-    const r = await fetch('/web/api/resync-follows', {method:'POST'});
-    const d = await r.json();
-    msg.textContent = d.message;
-    toast(d.message);
-  } catch(e) {
-    msg.textContent = 'Error: ' + e.message;
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = orig;
-  }
-}
 
 // ── Import Following ─────────────────────────────────────────────────────────
 async function importFollowing() {
@@ -1005,6 +1010,72 @@ async function importFollowing() {
     el.innerHTML = html;
 
     if (d.published) { toast('Kind-3 published — ' + ok + ' new follows added'); loadFollowers(); }
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHTML;
+  }
+}
+
+// ── Import Bluesky Following ──────────────────────────────────────────────────
+async function importBskyFollowing() {
+  const raw = document.getElementById('import-bsky-textarea').value;
+  const handles = raw.split('\n').map(h => h.trim()).filter(Boolean);
+  if (!handles.length) { toast('No handles entered'); return; }
+
+  const btn    = document.getElementById('btn-import-bsky');
+  const status = document.getElementById('import-bsky-status');
+  btn.disabled = true;
+  const origHTML = btn.innerHTML;
+  btn.textContent = 'Following…';
+  status.textContent = 'Resolving handles and following on Bluesky…';
+
+  try {
+    const r = await fetch('/web/api/import-bsky-following', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({handles}),
+    });
+    const d = await r.json();
+
+    const ok  = (d.results||[]).filter(r => r.status==='ok').length;
+    const err = (d.results||[]).filter(r => r.status==='error').length;
+    let msg = ok + ' followed';
+    if (err) msg += ', ' + err + ' failed';
+    if (d.published) msg += ' — kind-3 published (' + d.total_follows + ' total follows)';
+    else if (d.error) msg += ' — ' + d.error;
+    if (!d.fetched_existing) msg += ' ⚠ no existing kind-3 found on relay';
+    status.textContent = msg;
+
+    const el = document.getElementById('import-bsky-results');
+    if (!d.results || d.results.length === 0) { el.innerHTML = ''; return; }
+
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px">'
+      + '<thead><tr style="color:var(--muted);text-align:left">'
+      + '<th style="padding:5px 8px;border-bottom:1px solid var(--border)">Handle / DID</th>'
+      + '<th style="padding:5px 8px;border-bottom:1px solid var(--border)">Status</th>'
+      + '<th style="padding:5px 8px;border-bottom:1px solid var(--border)">Npub / Error</th>'
+      + '</tr></thead><tbody>';
+
+    (d.results||[]).forEach(r => {
+      const isOk = r.status === 'ok';
+      const statusCell = isOk
+        ? '<span style="color:var(--green);font-weight:600">✓ ok</span>'
+        : '<span style="color:var(--red);font-weight:600">✗ error</span>';
+      const detail = isOk
+        ? '<span style="font-family:monospace;color:var(--muted)">' + esc(r.npub||'') + '</span>'
+        : '<span style="color:var(--red)">' + esc(r.error||'') + '</span>';
+      html += '<tr style="border-bottom:1px solid var(--border)">'
+        + '<td style="padding:5px 8px;font-family:monospace">' + esc(r.handle) + '</td>'
+        + '<td style="padding:5px 8px">' + statusCell + '</td>'
+        + '<td style="padding:5px 8px">' + detail + '</td>'
+        + '</tr>';
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+
+    if (d.published) { toast('Kind-3 published — ' + ok + ' new Bluesky follows added'); loadFollowing(); }
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
   } finally {

@@ -183,6 +183,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/api/sync-bsky", s.handleAdminSyncBsky)
 			r.Post("/api/resync-accounts", s.handleAdminResyncAccounts)
 			r.Post("/api/import-following", s.handleImportFollowing)
+			r.Post("/api/import-bsky-following", s.handleImportBskyFollowing)
 			r.Get("/api/following", s.handleGetFollowing)
 			r.Post("/api/follow", s.handleAddFollow)
 			r.Post("/api/unfollow", s.handleRemoveFollow)

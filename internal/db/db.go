@@ -64,31 +64,38 @@ func (s *Store) Migrate() error {
 	return s.migratePostgres()
 }
 
-func (s *Store) migrateSQLite() error {
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS objects (
-			ap_id    TEXT NOT NULL UNIQUE,
-			nostr_id TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE INDEX IF NOT EXISTS objects_nostr_id ON objects(nostr_id)`,
-		`CREATE TABLE IF NOT EXISTS follows (
-			follower_id TEXT NOT NULL,
-			followed_id TEXT NOT NULL,
-			UNIQUE(follower_id, followed_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS follows_follower ON follows(follower_id)`,
-		`CREATE INDEX IF NOT EXISTS follows_followed ON follows(followed_id)`,
-		`CREATE TABLE IF NOT EXISTS actor_keys (
-			pubkey       TEXT NOT NULL PRIMARY KEY,
-			ap_actor_url TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE TABLE IF NOT EXISTS kv (
-			key   TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		)`,
-	}
+// commonMigrations lists DDL statements shared between SQLite and PostgreSQL.
+// Any new migration must be appended here; driver-specific error handling is
+// applied by migrateSQLite / migratePostgres.
+var commonMigrations = []string{
+	`CREATE TABLE IF NOT EXISTS objects (
+		ap_id    TEXT NOT NULL UNIQUE,
+		nostr_id TEXT NOT NULL UNIQUE
+	)`,
+	`CREATE INDEX IF NOT EXISTS objects_nostr_id ON objects(nostr_id)`,
+	`CREATE TABLE IF NOT EXISTS follows (
+		follower_id TEXT NOT NULL,
+		followed_id TEXT NOT NULL,
+		UNIQUE(follower_id, followed_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS follows_follower ON follows(follower_id)`,
+	`CREATE INDEX IF NOT EXISTS follows_followed ON follows(followed_id)`,
+	`CREATE TABLE IF NOT EXISTS actor_keys (
+		pubkey       TEXT NOT NULL PRIMARY KEY,
+		ap_actor_url TEXT NOT NULL UNIQUE
+	)`,
+	`CREATE TABLE IF NOT EXISTS kv (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	)`,
+	// Indexes covering the LIKE-prefix filters used by Stats() and type-filtered
+	// follower/following queries. Prefix scans are efficient once the column is indexed.
+	`CREATE INDEX IF NOT EXISTS objects_ap_id ON objects(ap_id)`,
+	`CREATE INDEX IF NOT EXISTS follows_follower_type ON follows(followed_id, follower_id)`,
+}
 
-	for _, m := range migrations {
+func (s *Store) migrateSQLite() error {
+	for _, m := range commonMigrations {
 		if _, err := s.db.Exec(m); err != nil {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
 		}
@@ -98,30 +105,7 @@ func (s *Store) migrateSQLite() error {
 }
 
 func (s *Store) migratePostgres() error {
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS objects (
-			ap_id    TEXT NOT NULL UNIQUE,
-			nostr_id TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE INDEX IF NOT EXISTS objects_nostr_id ON objects(nostr_id)`,
-		`CREATE TABLE IF NOT EXISTS follows (
-			follower_id TEXT NOT NULL,
-			followed_id TEXT NOT NULL,
-			UNIQUE(follower_id, followed_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS follows_follower ON follows(follower_id)`,
-		`CREATE INDEX IF NOT EXISTS follows_followed ON follows(followed_id)`,
-		`CREATE TABLE IF NOT EXISTS actor_keys (
-			pubkey       TEXT NOT NULL PRIMARY KEY,
-			ap_actor_url TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE TABLE IF NOT EXISTS kv (
-			key   TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		)`,
-	}
-
-	for _, m := range migrations {
+	for _, m := range commonMigrations {
 		if _, err := s.db.Exec(m); err != nil {
 			// Ignore "already exists" errors on index creation for idempotency.
 			if strings.Contains(err.Error(), "already exists") {
@@ -219,17 +203,39 @@ func (s *Store) GetFollowers(followedID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanStringRows(rows)
+}
 
-	var result []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, id)
+// GetAPFollowers returns only ActivityPub follower IDs (those starting with "http")
+// for a given followed ID. Bluesky entries (prefixed "bsky:") are excluded.
+func (s *Store) GetAPFollowers(followedID string) ([]string, error) {
+	var q string
+	if s.driver == "sqlite" {
+		q = `SELECT follower_id FROM follows WHERE followed_id = ? AND follower_id LIKE 'http%'`
+	} else {
+		q = `SELECT follower_id FROM follows WHERE followed_id = $1 AND follower_id LIKE 'http%'`
 	}
-	return result, rows.Err()
+	rows, err := s.db.Query(q, followedID)
+	if err != nil {
+		return nil, err
+	}
+	return scanStringRows(rows)
+}
+
+// GetBskyFollowers returns only Bluesky follower IDs (those starting with "bsky:")
+// for a given followed ID.
+func (s *Store) GetBskyFollowers(followedID string) ([]string, error) {
+	var q string
+	if s.driver == "sqlite" {
+		q = `SELECT follower_id FROM follows WHERE followed_id = ? AND follower_id LIKE 'bsky:%'`
+	} else {
+		q = `SELECT follower_id FROM follows WHERE followed_id = $1 AND follower_id LIKE 'bsky:%'`
+	}
+	rows, err := s.db.Query(q, followedID)
+	if err != nil {
+		return nil, err
+	}
+	return scanStringRows(rows)
 }
 
 // GetFollowing returns all followed IDs for a given follower ID.
@@ -238,17 +244,7 @@ func (s *Store) GetFollowing(followerID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var result []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, id)
-	}
-	return result, rows.Err()
+	return scanStringRows(rows)
 }
 
 // GetAPFollowing returns only ActivityPub followed IDs (those starting with "http")
@@ -264,17 +260,7 @@ func (s *Store) GetAPFollowing(followerID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var result []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, id)
-	}
-	return result, rows.Err()
+	return scanStringRows(rows)
 }
 
 // GetBskyFollowing returns only Bluesky followed IDs (those starting with "bsky:")
@@ -290,17 +276,7 @@ func (s *Store) GetBskyFollowing(followerID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var result []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, id)
-	}
-	return result, rows.Err()
+	return scanStringRows(rows)
 }
 
 // ─── Actor keys ───────────────────────────────────────────────────────────────
@@ -324,17 +300,7 @@ func (s *Store) GetAllActorURLs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var urls []string
-	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err != nil {
-			return nil, err
-		}
-		urls = append(urls, u)
-	}
-	return urls, rows.Err()
+	return scanStringRows(rows)
 }
 
 // GetActorForKey returns the AP actor URL for a derived Nostr pubkey, if known.
@@ -376,12 +342,13 @@ func (s *Store) GetKV(key string) (string, bool) {
 // StoreStats holds aggregate counts returned by Stats.
 type StoreStats struct {
 	// Fediverse bridge
-	FollowerCount    int
+	FollowerCount    int // AP followers only (follower_id LIKE 'http%')
 	ActorKeyCount    int
 	FediverseObjects int // objects whose ap_id starts with http (AP URLs)
 	// Bluesky bridge
-	BskyObjects  int   // objects whose ap_id starts with at:// (AT Protocol URIs)
-	BskyLastSeen string // ISO 8601 timestamp from kv table; empty if never polled
+	BskyFollowerCount int    // Bluesky followers (follower_id LIKE 'bsky:%')
+	BskyObjects       int    // objects whose ap_id starts with at:// (AT Protocol URIs)
+	BskyLastSeen      string // ISO 8601 timestamp from kv table; empty if never polled
 	// Combined
 	TotalObjects int
 	// Account resync
@@ -390,24 +357,54 @@ type StoreStats struct {
 }
 
 // Stats returns aggregate counts for the given followed actor URL.
+// The 9 original single-column queries are reduced to 2 batched SQL statements
+// plus 3 KV lookups, using FILTER (ANSI SQL, supported by SQLite ≥ 3.30 and PostgreSQL).
 func (s *Store) Stats(followedID string) (StoreStats, error) {
 	var st StoreStats
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM follows WHERE followed_id = `+s.ph(), followedID).Scan(&st.FollowerCount); err != nil {
+
+	// ── Query 1: follower counts split by bridge type ──────────────────────────
+	var followersQ string
+	if s.driver == "sqlite" {
+		followersQ = `
+			SELECT
+				COUNT(*) FILTER (WHERE follower_id LIKE 'http%') AS ap_followers,
+				COUNT(*) FILTER (WHERE follower_id LIKE 'bsky:%') AS bsky_followers
+			FROM follows
+			WHERE followed_id = ?`
+	} else {
+		followersQ = `
+			SELECT
+				COUNT(*) FILTER (WHERE follower_id LIKE 'http%') AS ap_followers,
+				COUNT(*) FILTER (WHERE follower_id LIKE 'bsky:%') AS bsky_followers
+			FROM follows
+			WHERE followed_id = $1`
+	}
+	if err := s.db.QueryRow(followersQ, followedID).Scan(&st.FollowerCount, &st.BskyFollowerCount); err != nil {
 		return st, err
 	}
-	// Fediverse objects have http/https ap_ids; Bluesky objects have at:// ap_ids.
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects WHERE ap_id LIKE 'http%'`).Scan(&st.FediverseObjects); err != nil {
+
+	// ── Query 2: object and actor-key counts ──────────────────────────────────
+	// CTE combines counts across two tables in a single roundtrip.
+	const objectsQ = `
+		WITH obj AS (
+			SELECT
+				COUNT(*) FILTER (WHERE ap_id LIKE 'http%')  AS fediverse_objects,
+				COUNT(*) FILTER (WHERE ap_id LIKE 'at://%') AS bsky_objects,
+				COUNT(*)                                     AS total_objects
+			FROM objects
+		), ak AS (
+			SELECT COUNT(*) AS actor_key_count FROM actor_keys
+		)
+		SELECT fediverse_objects, bsky_objects, total_objects, actor_key_count
+		FROM obj, ak`
+
+	if err := s.db.QueryRow(objectsQ).Scan(
+		&st.FediverseObjects, &st.BskyObjects, &st.TotalObjects, &st.ActorKeyCount,
+	); err != nil {
 		return st, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects WHERE ap_id LIKE 'at://%'`).Scan(&st.BskyObjects); err != nil {
-		return st, err
-	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM objects`).Scan(&st.TotalObjects); err != nil {
-		return st, err
-	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM actor_keys`).Scan(&st.ActorKeyCount); err != nil {
-		return st, err
-	}
+
+	// ── KV lookups: timestamps and resync metadata ─────────────────────────────
 	st.BskyLastSeen, _ = s.GetKV("bsky_last_seen_at")
 	st.LastResyncAt, _ = s.GetKV("last_resync_at")
 	st.LastResyncCount, _ = s.GetKV("last_resync_count")
@@ -415,6 +412,21 @@ func (s *Store) Stats(followedID string) (StoreStats, error) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// scanStringRows scans a single-string-column result set into a slice.
+// It closes rows before returning.
+func scanStringRows(rows *sql.Rows) ([]string, error) {
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		result = append(result, s)
+	}
+	return result, rows.Err()
+}
 
 // ph returns the SQL placeholder token for a single-argument query.
 // SQLite uses ? and PostgreSQL uses $1.

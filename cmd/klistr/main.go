@@ -187,13 +187,14 @@ func main() {
 			}
 			bskyTrigger = make(chan struct{}, 1)
 			poller := &bsky.Poller{
-				Client:      bskyClient,
-				Publisher:   publisher,
-				Signer:      signer,
-				Store:       store,
-				LocalPubKey: cfg.NostrPublicKey,
-				Interval:    30 * time.Second,
-				TriggerCh:   bskyTrigger,
+				Client:        bskyClient,
+				Publisher:     publisher,
+				Signer:        signer,
+				Store:         store,
+				LocalPubKey:   cfg.NostrPublicKey,
+				LocalActorURL: localActorURL,
+				Interval:      30 * time.Second,
+				TriggerCh:     bskyTrigger,
 			}
 			go poller.Start(ctx)
 			slog.Info("bsky bridge enabled", "identifier", cfg.BskyIdentifier)

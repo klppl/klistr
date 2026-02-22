@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -33,18 +34,20 @@ type Signer interface {
 type PollerStore interface {
 	AddObject(apID, nostrID string) error
 	GetNostrIDForObject(apID string) (string, bool)
+	AddFollow(followerID, followedID string) error
 	SetKV(key, value string) error
 	GetKV(key string) (string, bool)
 }
 
 // Poller polls Bluesky notifications and publishes them as Nostr events.
 type Poller struct {
-	Client      *Client
-	Publisher   Publisher
-	Signer      Signer
-	Store       PollerStore
-	LocalPubKey string
-	Interval    time.Duration
+	Client        *Client
+	Publisher     Publisher
+	Signer        Signer
+	Store         PollerStore
+	LocalPubKey   string
+	LocalActorURL string // used to record inbound Bluesky followers
+	Interval      time.Duration
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
 	TriggerCh <-chan struct{}
 }
@@ -101,9 +104,7 @@ func (p *Poller) poll(ctx context.Context) {
 	// Process oldest-first (API returns newest-first, so reverse).
 	notifs := make([]Notification, len(resp.Notifications))
 	copy(notifs, resp.Notifications)
-	for i, j := 0, len(notifs)-1; i < j; i, j = i+1, j-1 {
-		notifs[i], notifs[j] = notifs[j], notifs[i]
-	}
+	slices.Reverse(notifs)
 
 	var newest string
 	for i := range notifs {
@@ -131,6 +132,18 @@ func (p *Poller) handleNotification(ctx context.Context, n *Notification) {
 
 	switch n.Reason {
 	case "follow":
+		// Persist the follower so the admin UI can display them.
+		if p.LocalActorURL != "" && n.Author.DID != "" {
+			followerID := "bsky:" + n.Author.DID
+			if err := p.Store.AddFollow(followerID, p.LocalActorURL); err != nil {
+				slog.Warn("bsky poller: failed to store follower", "did", n.Author.DID, "error", err)
+			}
+			if n.Author.Handle != "" {
+				if err := p.Store.SetKV("bsky_follower_handle_"+n.Author.DID, n.Author.Handle); err != nil {
+					slog.Warn("bsky poller: failed to store follower handle", "did", n.Author.DID, "error", err)
+				}
+			}
+		}
 		// Send a NIP-04 self-DM notification.
 		msg := "🔔 New Bluesky follower: @" + n.Author.Handle
 		dm, err := p.Signer.CreateDMToSelf(msg)

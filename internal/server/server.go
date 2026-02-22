@@ -262,9 +262,9 @@ func (s *Server) handleFollowers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Followers are stored keyed by the full local actor URL.
+	// Only AP followers (http URLs) belong in the ActivityPub followers collection.
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
-	followers, err := s.store.GetFollowers(localActorURL)
+	followers, err := s.store.GetAPFollowers(localActorURL)
 	if err != nil {
 		slog.Error("get followers", "error", err)
 		followers = []string{}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -132,14 +133,13 @@ func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error)
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
+// errAuthExpired is returned by doRequest when the PDS signals that the
+// current access token is no longer valid (HTTP 401 or ExpiredToken body).
+var errAuthExpired = errors.New("auth expired")
+
 // isAuthError returns true for errors that indicate a stale/expired token.
-// Bluesky may return HTTP 401 or HTTP 400 with error=ExpiredToken.
 func isAuthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "401") || strings.Contains(s, "ExpiredToken")
+	return errors.Is(err, errAuthExpired)
 }
 
 // authedPost performs an authenticated XRPC POST, re-authenticating on auth errors.
@@ -232,6 +232,12 @@ func (c *Client) doRequest(req *http.Request, out interface{}) error {
 		return fmt.Errorf("read response body: %w", err)
 	}
 
+	if resp.StatusCode == 401 {
+		return errAuthExpired
+	}
+	if resp.StatusCode == 400 && strings.Contains(string(respBody), "ExpiredToken") {
+		return errAuthExpired
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}

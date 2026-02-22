@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 )
 
 // Federator handles outbound federation of AP activities.
@@ -32,15 +33,32 @@ func (f *Federator) Federate(ctx context.Context, activity map[string]interface{
 		"inboxes", len(inboxes),
 	)
 
+	// Deliver to all inboxes in parallel, bounded to avoid overwhelming remote
+	// servers and exhausting local resources during large fan-outs.
+	const federationConcurrency = 10
+	sem := make(chan struct{}, federationConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var success, failed int
+
 	for inbox := range inboxes {
-		if err := DeliverActivity(ctx, inbox, activity, f.KeyID, f.PrivateKey); err != nil {
-			slog.Warn("federation failed", "inbox", inbox, "error", err)
-			failed++
-		} else {
-			success++
-		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(inbox string) {
+			defer func() { <-sem; wg.Done() }()
+			if err := DeliverActivity(ctx, inbox, activity, f.KeyID, f.PrivateKey); err != nil {
+				slog.Warn("federation failed", "inbox", inbox, "error", err)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				success++
+				mu.Unlock()
+			}
+		}(inbox)
 	}
+	wg.Wait()
 
 	slog.Debug("federation complete",
 		"id", id,

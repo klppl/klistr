@@ -20,7 +20,13 @@ type RelayPool struct {
 	writeRelays  []string
 	authorPubKey string
 	handler      EventHandler
+	sem          chan struct{} // limits concurrent event-handler goroutines
 }
+
+// relayEventConcurrency is the maximum number of event-handler goroutines that
+// may run simultaneously. Events arriving while all slots are occupied are
+// dropped with a warning rather than spawning unbounded goroutines.
+const relayEventConcurrency = 20
 
 // NewRelayPool creates a relay pool that subscribes to events from authorPubKey.
 func NewRelayPool(readRelays, writeRelays []string, authorPubKey string, handler EventHandler) *RelayPool {
@@ -29,6 +35,7 @@ func NewRelayPool(readRelays, writeRelays []string, authorPubKey string, handler
 		writeRelays:  writeRelays,
 		authorPubKey: authorPubKey,
 		handler:      handler,
+		sem:          make(chan struct{}, relayEventConcurrency),
 	}
 }
 
@@ -67,15 +74,23 @@ func (rp *RelayPool) Start(ctx context.Context) {
 				continue
 			}
 			// Process event in a goroutine to avoid blocking the subscription.
+			// The semaphore caps concurrency; events that arrive while all slots
+			// are occupied are dropped with a warning instead of piling up.
 			event := ev.Event
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("panic in event handler", "panic", r)
-					}
+			select {
+			case rp.sem <- struct{}{}:
+				go func() {
+					defer func() { <-rp.sem }()
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("panic in event handler", "panic", r)
+						}
+					}()
+					rp.handler(ctx, event)
 				}()
-				rp.handler(ctx, event)
-			}()
+			default:
+				slog.Warn("relay event dropped: handler backlog full", "id", event.ID)
+			}
 		}
 
 		// If we exit the loop (relay disconnect), wait and reconnect.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{
 		"bsky_enabled":        s.cfg.BskyEnabled(),
 		"fediverse_followers": stats.FollowerCount,
+		"bsky_followers":      stats.BskyFollowerCount,
 		"fediverse_actors":    stats.ActorKeyCount,
 		"fediverse_objects":   stats.FediverseObjects,
 		"bsky_objects":        stats.BskyObjects,
@@ -94,20 +96,52 @@ func (s *Server) handleAdminResyncAccounts(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+type followerEntry struct {
+	URL    string `json:"url"`
+	Handle string `json:"handle"`
+}
+
 func (s *Server) handleAdminFollowers(w http.ResponseWriter, r *http.Request) {
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
-	followers, err := s.store.GetFollowers(localActorURL)
+
+	apFollowers, err := s.store.GetAPFollowers(localActorURL)
 	if err != nil {
-		slog.Error("admin followers query failed", "error", err)
+		slog.Error("admin ap followers query failed", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if followers == nil {
-		followers = []string{}
+
+	bskyFollowerIDs, err := s.store.GetBskyFollowers(localActorURL)
+	if err != nil {
+		slog.Error("admin bsky followers query failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+
+	// Build response slices.
+	fedItems := make([]followerEntry, 0, len(apFollowers))
+	for _, url := range apFollowers {
+		fedItems = append(fedItems, followerEntry{URL: url})
+	}
+
+	bskyItems := make([]followerEntry, 0, len(bskyFollowerIDs))
+	for _, id := range bskyFollowerIDs {
+		did := strings.TrimPrefix(id, "bsky:")
+		handle, _ := s.store.GetKV("bsky_follower_handle_" + did)
+		if handle == "" {
+			handle = did
+		}
+		bskyItems = append(bskyItems, followerEntry{
+			URL:    "https://bsky.app/profile/" + handle,
+			Handle: handle,
+		})
+	}
+
 	jsonResponse(w, map[string]interface{}{
-		"items": followers,
-		"total": len(followers),
+		"fediverse":       fedItems,
+		"bluesky":         bskyItems,
+		"total_fediverse": len(fedItems),
+		"total_bluesky":   len(bskyItems),
 	}, http.StatusOK)
 }
 
@@ -349,10 +383,19 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   </div>
 </div>
 
-<!-- Row 3: Fediverse Followers -->
+<!-- Row 3: Followers -->
 <div class="card-full">
-  <h2>Fediverse Followers</h2>
-  <div class="followers-list" id="followers-list"><span class="empty">loading…</span></div>
+  <h2>Followers</h2>
+  <div class="grid2">
+    <div>
+      <div style="font-size:12px;color:var(--blue);font-weight:600;margin-bottom:8px">🌐 Fediverse</div>
+      <div id="fed-followers-container"><span class="empty">loading…</span></div>
+    </div>
+    <div>
+      <div style="font-size:12px;color:var(--sky);font-weight:600;margin-bottom:8px">☁ Bluesky</div>
+      <div id="bsky-followers-container"><span class="empty">loading…</span></div>
+    </div>
+  </div>
 </div>
 
 <!-- Row 4: Following -->
@@ -665,32 +708,79 @@ async function loadStats() {
   if (d.bsky_enabled) {
     bskyBody.innerHTML =
       '<div class="bp-row"><span class="bpl">Status</span><span class="bpv"><span class="badge badge-green">active</span></span></div>'+
-      '<div class="bp-row"><span class="bpl">Objects</span><span class="bpv big">'+esc(String(d.bsky_objects??'—'))+'</span></div>'+
+      '<div class="bp-row"><span class="bpl">Followers</span><span class="bpv big">'+esc(String(d.bsky_followers??'—'))+'</span></div>'+
+      '<div class="bp-row"><span class="bpl">Objects</span><span class="bpv">'+esc(String(d.bsky_objects??'—'))+'</span></div>'+
       '<div class="bp-row"><span class="bpl">Last sync</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_seen))+'</span></div>';
   }
 
   // Total panel
-  document.getElementById('bp-total-obj').textContent = d.total_objects       ?? '—';
-  document.getElementById('bp-total-fol').textContent = d.fediverse_followers ?? '—';
-  document.getElementById('bp-total-act').textContent = d.fediverse_actors    ?? '—';
+  const totalFollowers = (d.fediverse_followers ?? 0) + (d.bsky_followers ?? 0);
+  document.getElementById('bp-total-obj').textContent = d.total_objects    ?? '—';
+  document.getElementById('bp-total-fol').textContent = totalFollowers;
+  document.getElementById('bp-total-act').textContent = d.fediverse_actors ?? '—';
 }
 
 // ── Followers ────────────────────────────────────────────────────────────────
+// Renders items into container with a collapse toggle when count > limit.
+function renderCollapsibleList(container, items, emptyMsg, renderItem, limit) {
+  if (limit === undefined) limit = 5;
+  container.innerHTML = '';
+  if (!items || items.length === 0) {
+    container.innerHTML = '<span class="empty">'+esc(emptyMsg)+'</span>';
+    return;
+  }
+  const list = document.createElement('div');
+  list.className = 'followers-list';
+  list.style.maxHeight = 'none';
+  list.style.overflow = 'visible';
+
+  const visibleItems = items.slice(0, limit);
+  const hiddenItems  = items.slice(limit);
+
+  visibleItems.forEach(item => list.appendChild(renderItem(item)));
+  const hiddenEls = hiddenItems.map(item => {
+    const el = renderItem(item);
+    el.style.display = 'none';
+    list.appendChild(el);
+    return el;
+  });
+  container.appendChild(list);
+
+  if (hiddenItems.length > 0) {
+    const toggle = document.createElement('button');
+    toggle.style.cssText = 'margin-top:6px;width:100%;background:none;border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--muted);cursor:pointer;font-size:11px;font-family:inherit';
+    toggle.textContent = 'Show '+hiddenItems.length+' more…';
+    let expanded = false;
+    toggle.addEventListener('click', () => {
+      expanded = !expanded;
+      hiddenEls.forEach(el => el.style.display = expanded ? '' : 'none');
+      toggle.textContent = expanded ? 'Show less' : 'Show '+hiddenItems.length+' more…';
+    });
+    container.appendChild(toggle);
+  }
+}
+
 async function loadFollowers() {
   const r = await fetch('/web/api/followers');
   const d = await r.json();
-  const el = document.getElementById('followers-list');
-  el.innerHTML = '';
-  if (!d.items || d.items.length === 0) {
-    el.innerHTML = '<span class="empty">No Fediverse followers yet.</span>';
-    return;
-  }
-  d.items.forEach(url => {
-    const div = document.createElement('div'); div.className='follower';
-    const handle = formatFollowerURL(url);
+
+  // Fediverse followers
+  const fedContainer = document.getElementById('fed-followers-container');
+  renderCollapsibleList(fedContainer, d.fediverse || [], 'No Fediverse followers yet.', item => {
+    const div = document.createElement('div'); div.className = 'follower';
+    const handle = formatFollowerURL(item.url);
     div.innerHTML = '<span class="f-handle">'+esc(handle)+'</span>'+
-      '<a href="'+esc(url)+'" target="_blank" rel="noopener">→ profile</a>';
-    el.appendChild(div);
+      '<a href="'+esc(item.url)+'" target="_blank" rel="noopener">→ profile</a>';
+    return div;
+  });
+
+  // Bluesky followers
+  const bskyContainer = document.getElementById('bsky-followers-container');
+  renderCollapsibleList(bskyContainer, d.bluesky || [], 'No Bluesky followers yet.', item => {
+    const div = document.createElement('div'); div.className = 'follower';
+    div.innerHTML = '<span class="f-handle">@'+esc(item.handle)+'</span>'+
+      '<a href="'+esc(item.url)+'" target="_blank" rel="noopener">→ profile</a>';
+    return div;
   });
 }
 

@@ -111,13 +111,30 @@ func (p *Publisher) getPool() *nostr.SimplePool {
 }
 
 // Publish publishes an event to all configured write relays.
+// A fresh 15-second timeout is used for each publish attempt, decoupled from
+// the caller's context. This prevents short-lived or already-cancelled contexts
+// (HTTP request contexts, per-operation timeouts) from aborting relay delivery.
 func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 	if len(p.writeRelays) == 0 {
 		slog.Warn("no write relays configured; event not published", "id", event.ID, "kind", event.Kind)
 		return nil
 	}
 
-	results := p.getPool().PublishMany(ctx, p.writeRelays, *event)
+	// Honour explicit cancellation (e.g. SIGTERM) but otherwise use an
+	// independent deadline so relay reconnect + handshake time doesn't cause
+	// spurious "context canceled" failures.
+	publishCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// Propagate explicit cancellation from the caller.
+	go func() {
+		select {
+		case <-ctx.Done():
+			cancel()
+		case <-publishCtx.Done():
+		}
+	}()
+
+	results := p.getPool().PublishMany(publishCtx, p.writeRelays, *event)
 
 	var published, failed int
 	for result := range results {

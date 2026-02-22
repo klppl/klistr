@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/klppl/klistr/internal/ap"
@@ -387,7 +388,10 @@ func (s *Server) publishBskyProfileKind0(ctx context.Context, profile *bsky.Prof
 // Fediverse: fires the existing AccountResyncer trigger so all AP actor profiles
 // are re-fetched and re-published in the background (same as "Re-sync Accounts").
 func (s *Server) handleResyncFollowProfiles(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	// Use a background context with a generous timeout so that profile fetches
+	// and relay publishes are not cut short when the HTTP response is written.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
 
 	var bskySynced, bskyErrors int

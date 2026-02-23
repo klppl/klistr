@@ -96,6 +96,18 @@ func (c *Client) ListNotifications(ctx context.Context, cursor string) (*ListNot
 	return &resp, nil
 }
 
+// GetTimeline fetches the home timeline (posts from followed accounts) via
+// app.bsky.feed.getTimeline. Returns at most 50 items, newest first.
+func (c *Client) GetTimeline(ctx context.Context) (*GetTimelineResponse, error) {
+	params := url.Values{}
+	params.Set("limit", "50")
+	var resp GetTimelineResponse
+	if err := c.authedGet(ctx, "app.bsky.feed.getTimeline", params, &resp); err != nil {
+		return nil, fmt.Errorf("bsky getTimeline: %w", err)
+	}
+	return &resp, nil
+}
+
 // FollowActor creates a follow record for the given DID via app.bsky.graph.follow.
 // Returns the rkey of the created record (used for later deletion).
 func (c *Client) FollowActor(ctx context.Context, did string) (string, error) {

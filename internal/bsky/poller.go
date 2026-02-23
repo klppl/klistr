@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -15,6 +16,14 @@ import (
 // notification. Used to skip already-handled notifications on subsequent polls
 // (the API cursor is for backwards pagination, not forward polling).
 const kvLastSeenKey = "bsky_last_seen_at"
+
+// kvLastPollKey stores the RFC3339 timestamp of the most-recent successful
+// ListNotifications API call, regardless of whether any notifications were new.
+const kvLastPollKey = "bsky_last_poll_at"
+
+// kvTimelineLastSeenKey stores the indexedAt timestamp of the most-recently
+// processed timeline post, used to skip already-handled items on next poll.
+const kvTimelineLastSeenKey = "bsky_timeline_last_seen_at"
 
 // Publisher is the subset of nostr.Publisher used by the Poller.
 type Publisher interface {
@@ -84,9 +93,15 @@ func (p *Poller) Start(ctx context.Context) {
 	}
 }
 
-// poll fetches new notifications from Bluesky and processes any that are newer
-// than the last-seen timestamp stored in the KV store.
+// poll runs one full polling cycle: notifications then timeline.
 func (p *Poller) poll(ctx context.Context) {
+	p.pollNotifications(ctx)
+	p.pollTimeline(ctx)
+}
+
+// pollNotifications fetches new Bluesky notifications (likes, reposts, replies,
+// mentions, follows) and converts them to Nostr events.
+func (p *Poller) pollNotifications(ctx context.Context) {
 	// Always fetch from the top (newest first); we filter by indexedAt ourselves.
 	// The API cursor is for backwards pagination, not forward polling.
 	resp, err := p.Client.ListNotifications(ctx, "")
@@ -94,6 +109,9 @@ func (p *Poller) poll(ctx context.Context) {
 		slog.Warn("bsky poller: list notifications failed", "error", err)
 		return
 	}
+
+	// Record that the poll completed successfully, regardless of new notifications.
+	_ = p.Store.SetKV(kvLastPollKey, time.Now().UTC().Format(time.RFC3339))
 
 	if len(resp.Notifications) == 0 {
 		return
@@ -124,6 +142,137 @@ func (p *Poller) poll(ctx context.Context) {
 			slog.Warn("bsky poller: failed to save last-seen timestamp", "error", err)
 		}
 	}
+}
+
+// pollTimeline fetches posts from followed Bluesky accounts and bridges them
+// to Nostr kind-1 events, mirroring how Fediverse follows work via AP inbox.
+func (p *Poller) pollTimeline(ctx context.Context) {
+	resp, err := p.Client.GetTimeline(ctx)
+	if err != nil {
+		slog.Warn("bsky poller: get timeline failed", "error", err)
+		return
+	}
+	if len(resp.Feed) == 0 {
+		return
+	}
+
+	lastSeen, _ := p.Store.GetKV(kvTimelineLastSeenKey)
+
+	// Process oldest-first (API returns newest-first, so reverse).
+	items := make([]TimelineFeedPost, len(resp.Feed))
+	copy(items, resp.Feed)
+	slices.Reverse(items)
+
+	var newest string
+	for i := range items {
+		item := &items[i]
+		if lastSeen != "" && item.Post.IndexedAt <= lastSeen {
+			continue
+		}
+		p.bridgeTimelinePost(ctx, item)
+		if item.Post.IndexedAt > newest {
+			newest = item.Post.IndexedAt
+		}
+	}
+
+	if newest != "" {
+		_ = p.Store.SetKV(kvTimelineLastSeenKey, newest)
+	}
+}
+
+// bridgeTimelinePost converts a single timeline feed item into a Nostr kind-1
+// event signed with a derived key for the Bluesky author's DID.
+func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost) {
+	post := &item.Post
+
+	// Skip the bridge account's own posts — they originate from Nostr.
+	if post.Author.DID == p.Client.DID() {
+		return
+	}
+
+	// Reposts (boosts) in the timeline are already bridged as kind-6 events
+	// via the notification poller when the local user's content is reposted,
+	// or are irrelevant third-party reposts. Skip them here.
+	if item.Reason != nil && strings.HasSuffix(item.Reason.Type, "#reasonRepost") {
+		return
+	}
+
+	// Idempotency: skip if this AT URI is already in the DB.
+	if _, ok := p.Store.GetNostrIDForObject(post.URI); ok {
+		return
+	}
+
+	record, _ := post.Record.(map[string]interface{})
+	content, _ := record["text"].(string)
+
+	// Parse the post's own createdAt; fall back to indexedAt.
+	var createdAt nostr.Timestamp
+	if ts, _ := record["createdAt"].(string); ts != "" {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			createdAt = nostr.Timestamp(t.Unix())
+		}
+	}
+	if createdAt == 0 {
+		if t, err := time.Parse(time.RFC3339, post.IndexedAt); err == nil {
+			createdAt = nostr.Timestamp(t.Unix())
+		} else {
+			createdAt = nostr.Now()
+		}
+	}
+
+	tags := nostr.Tags{{"proxy", post.URI, "atproto"}}
+
+	// Thread reply posts if the parent is already bridged.
+	if replyBlock, ok := record["reply"].(map[string]interface{}); ok {
+		parentNostrID, rootNostrID := p.resolveReplyRefs(replyBlock)
+		if parentNostrID != "" {
+			// NIP-10 positional convention: first e-tag = root, last = direct parent.
+			tags = append(tags, nostr.Tag{"e", rootNostrID}, nostr.Tag{"e", parentNostrID})
+			tags = append(tags, nostr.Tag{"p", p.LocalPubKey})
+		}
+	}
+
+	event := &nostr.Event{
+		Kind:      1,
+		Content:   content,
+		CreatedAt: createdAt,
+		Tags:      tags,
+	}
+
+	// Publish a kind-0 for the author so clients can display their profile.
+	p.publishAuthorProfile(ctx, post.Author.DID, post.Author.Handle, post.Author.DisplayName)
+
+	if err := p.Signer.Sign(event, post.Author.DID); err != nil {
+		slog.Warn("bsky poller: timeline: sign failed", "author", post.Author.Handle, "error", err)
+		return
+	}
+	if err := p.Publisher.Publish(ctx, event); err != nil {
+		slog.Warn("bsky poller: timeline: publish failed", "author", post.Author.Handle, "error", err)
+		return
+	}
+	if err := p.Store.AddObject(post.URI, event.ID); err != nil {
+		slog.Warn("bsky poller: timeline: store mapping failed", "uri", post.URI, "error", err)
+	}
+	slog.Info("bsky poller: bridged timeline post", "author", post.Author.Handle, "uri", post.URI)
+}
+
+// resolveReplyRefs looks up Nostr event IDs for the parent and root of a
+// Bluesky reply record. Returns empty strings if either is not bridged.
+func (p *Poller) resolveReplyRefs(replyBlock map[string]interface{}) (parentNostrID, rootNostrID string) {
+	if parent, ok := replyBlock["parent"].(map[string]interface{}); ok {
+		if uri, _ := parent["uri"].(string); uri != "" {
+			parentNostrID, _ = p.Store.GetNostrIDForObject(uri)
+		}
+	}
+	if root, ok := replyBlock["root"].(map[string]interface{}); ok {
+		if uri, _ := root["uri"].(string); uri != "" {
+			rootNostrID, _ = p.Store.GetNostrIDForObject(uri)
+		}
+	}
+	if rootNostrID == "" {
+		rootNostrID = parentNostrID
+	}
+	return
 }
 
 // handleNotification converts a single Bluesky notification to a Nostr event.
@@ -273,18 +422,18 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 	return true
 }
 
-// publishBskyAuthorProfile publishes a Nostr kind-0 metadata event for a
-// Bluesky author using their derived pseudonymous keypair. This allows Nostr
-// clients to display the author's profile and link back to their Bluesky account.
-func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) {
-	if n.Author.DID == "" || n.Author.Handle == "" {
+// publishAuthorProfile publishes a Nostr kind-0 metadata event for a Bluesky
+// author using their derived pseudonymous keypair, so Nostr clients can display
+// their profile and link back to their Bluesky account.
+func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayName string) {
+	if did == "" || handle == "" {
 		return
 	}
 
-	profileURL := "https://bsky.app/profile/" + n.Author.Handle
-	name := n.Author.DisplayName
+	profileURL := "https://bsky.app/profile/" + handle
+	name := displayName
 	if name == "" {
-		name = n.Author.Handle
+		name = handle
 	}
 
 	// Default bio is just the profile link; replaced with the real bio if the
@@ -292,7 +441,7 @@ func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) 
 	about := profileURL
 	var avatarURL, bannerURL string
 
-	if profile, err := p.Client.GetProfile(ctx, n.Author.DID); err == nil {
+	if profile, err := p.Client.GetProfile(ctx, did); err == nil {
 		if profile.DisplayName != "" {
 			name = profile.DisplayName
 		}
@@ -303,7 +452,7 @@ func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) 
 		bannerURL = profile.Banner
 	} else {
 		slog.Debug("bsky poller: could not fetch full profile, using minimal metadata",
-			"author", n.Author.Handle, "error", err)
+			"handle", handle, "error", err)
 	}
 
 	profileMeta := struct {
@@ -321,25 +470,26 @@ func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) 
 	}
 	metaBytes, err := json.Marshal(profileMeta)
 	if err != nil {
-		slog.Debug("bsky poller: failed to marshal author profile metadata", "author", n.Author.Handle, "error", err)
 		return
 	}
-	content := string(metaBytes)
 
 	meta := &nostr.Event{
 		Kind:      0,
-		Content:   content,
+		Content:   string(metaBytes),
 		CreatedAt: nostr.Now(),
 	}
 
-	if err := p.Signer.Sign(meta, n.Author.DID); err != nil {
-		slog.Debug("bsky poller: failed to sign author profile", "author", n.Author.Handle, "error", err)
+	if err := p.Signer.Sign(meta, did); err != nil {
 		return
 	}
-
 	if err := p.Publisher.Publish(ctx, meta); err != nil {
-		slog.Debug("bsky poller: failed to publish author profile", "author", n.Author.Handle, "error", err)
+		slog.Debug("bsky poller: failed to publish author profile", "handle", handle, "error", err)
 	}
+}
+
+// publishBskyAuthorProfile is a convenience wrapper used by the notification path.
+func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) {
+	p.publishAuthorProfile(ctx, n.Author.DID, n.Author.Handle, n.Author.DisplayName)
 }
 
 // sendDMNotification delivers a Bluesky interaction as a NIP-04 self-DM.

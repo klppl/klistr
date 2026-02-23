@@ -348,7 +348,8 @@ type StoreStats struct {
 	// Bluesky bridge
 	BskyFollowerCount int    // Bluesky followers (follower_id LIKE 'bsky:%')
 	BskyObjects       int    // objects whose ap_id starts with at:// (AT Protocol URIs)
-	BskyLastSeen      string // ISO 8601 timestamp from kv table; empty if never polled
+	BskyLastSeen      string // ISO 8601 timestamp of last processed notification; empty if none
+	BskyLastPoll      string // ISO 8601 timestamp of last successful API poll; empty if never run
 	// Combined
 	TotalObjects int
 	// Account resync
@@ -406,6 +407,7 @@ func (s *Store) Stats(followedID string) (StoreStats, error) {
 
 	// ── KV lookups: timestamps and resync metadata ─────────────────────────────
 	st.BskyLastSeen, _ = s.GetKV("bsky_last_seen_at")
+	st.BskyLastPoll, _ = s.GetKV("bsky_last_poll_at")
 	st.LastResyncAt, _ = s.GetKV("last_resync_at")
 	st.LastResyncCount, _ = s.GetKV("last_resync_count")
 	return st, nil

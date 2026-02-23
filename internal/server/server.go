@@ -59,6 +59,7 @@ type Server struct {
 	resyncTrigger   chan struct{}
 	followPublisher FollowPublisher
 	bskyClient      BskyClient
+	relayManager    RelayManager
 }
 
 // New creates a new Server.
@@ -94,6 +95,9 @@ func (s *Server) SetResyncTrigger(ch chan struct{}) { s.resyncTrigger = ch }
 // SetBskyClient attaches the Bluesky client used for individual follow management.
 // Nil disables the Bluesky follow/unfollow endpoints.
 func (s *Server) SetBskyClient(c BskyClient) { s.bskyClient = c }
+
+// SetRelayManager attaches the relay manager for the /web relay management endpoints.
+func (s *Server) SetRelayManager(rm RelayManager) { s.relayManager = rm }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -188,6 +192,11 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/api/follow", s.handleAddFollow)
 			r.Post("/api/unfollow", s.handleRemoveFollow)
 			r.Post("/api/resync-follows", s.handleResyncFollowProfiles)
+			r.Get("/api/relays", s.handleGetRelays)
+			r.Post("/api/relays", s.handleAddRelay)
+			r.Delete("/api/relays", s.handleRemoveRelay)
+			r.Post("/api/relays/test", s.handleTestRelay)
+			r.Post("/api/relays/reset-circuit", s.handleResetRelayCircuit)
 		})
 	}
 

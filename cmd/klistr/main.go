@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,6 +31,68 @@ import (
 	nostrpkg "github.com/klppl/klistr/internal/nostr"
 	"github.com/klppl/klistr/internal/server"
 )
+
+// relayManagerAdapter satisfies server.RelayManager by delegating to Publisher and RelayPool.
+// It also persists relay list changes to the DB so they survive restarts.
+type relayManagerAdapter struct {
+	publisher *nostrpkg.Publisher
+	pool      *nostrpkg.RelayPool
+	store     *db.Store
+}
+
+func (a *relayManagerAdapter) Relays() []string { return a.publisher.Relays() }
+
+func (a *relayManagerAdapter) RelayStatuses() []server.RelayStatus {
+	src := a.publisher.RelayStatuses()
+	out := make([]server.RelayStatus, len(src))
+	for i, s := range src {
+		out[i] = server.RelayStatus{
+			URL:               s.URL,
+			CircuitOpen:       s.CircuitOpen,
+			FailCount:         s.FailCount,
+			CooldownRemaining: s.CooldownRemaining,
+		}
+	}
+	return out
+}
+
+func (a *relayManagerAdapter) AddRelay(url string) bool {
+	added := a.publisher.AddRelay(url)
+	if added {
+		a.pool.AddRelay(url)
+		a.persist()
+	}
+	return added
+}
+
+func (a *relayManagerAdapter) RemoveRelay(url string) bool {
+	removed := a.publisher.RemoveRelay(url)
+	if removed {
+		a.pool.RemoveRelay(url)
+		a.persist()
+	}
+	return removed
+}
+
+func (a *relayManagerAdapter) ResetCircuit(url string) { a.publisher.ResetCircuit(url) }
+
+func (a *relayManagerAdapter) TestRelay(ctx context.Context, url string) error {
+	tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	relay, err := gonostr.RelayConnect(tctx, url)
+	if err != nil {
+		return err
+	}
+	relay.Close()
+	return nil
+}
+
+func (a *relayManagerAdapter) persist() {
+	relays := a.publisher.Relays()
+	if err := a.store.SetKV("nostr_relays", strings.Join(relays, ",")); err != nil {
+		slog.Warn("failed to persist relay list", "error", err)
+	}
+}
 
 // followPublisherAdapter satisfies server.FollowPublisher by delegating to
 // the Nostr Signer (for signing) and Publisher (for relay delivery).
@@ -110,6 +173,16 @@ func main() {
 	if err := store.Migrate(); err != nil {
 		slog.Error("database migration failed", "error", err)
 		os.Exit(1)
+	}
+
+	// ─── Relay list: prefer DB-persisted override over env ────────────────────
+	// Relay list changes made via /web admin UI are stored in kv["nostr_relays"].
+	if saved, ok := store.GetKV("nostr_relays"); ok && saved != "" {
+		overrides := strings.Split(saved, ",")
+		if len(overrides) > 0 {
+			cfg.NostrRelays = overrides
+			slog.Info("using persisted relay list", "relays", cfg.NostrRelays)
+		}
 	}
 
 	// ─── RSA Key Pair (auto-generated if missing) ─────────────────────────────
@@ -229,6 +302,7 @@ func main() {
 	}
 	srv.SetResyncTrigger(resyncTrigger)
 	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})
+	srv.SetRelayManager(&relayManagerAdapter{publisher: publisher, pool: pool, store: store})
 	srv.Start(ctx) // blocks until ctx is cancelled
 
 	slog.Info("klistr bridge stopped")

@@ -131,6 +131,38 @@ type ListNotificationsResponse struct {
 	Cursor        string         `json:"cursor"`
 }
 
+// ─── Timeline feed (app.bsky.feed.getTimeline) ────────────────────────────────
+
+// TimelineFeedPost is one entry in the timeline feed response.
+// Reason is non-nil when the post appears because someone the user follows
+// reposted it (app.bsky.feed.defs#reasonRepost).
+type TimelineFeedPost struct {
+	Post   TimelinePost `json:"post"`
+	Reason *FeedReason  `json:"reason,omitempty"`
+}
+
+// TimelinePost holds the core post data within a timeline feed item.
+type TimelinePost struct {
+	URI       string      `json:"uri"`
+	CID       string      `json:"cid"`
+	Author    NotifAuthor `json:"author"`
+	Record    interface{} `json:"record"`
+	IndexedAt string      `json:"indexedAt"`
+}
+
+// FeedReason indicates why a post appears in the timeline.
+// The only current variant is app.bsky.feed.defs#reasonRepost.
+type FeedReason struct {
+	Type string      `json:"$type"`
+	By   NotifAuthor `json:"by"`
+}
+
+// GetTimelineResponse is returned by app.bsky.feed.getTimeline.
+type GetTimelineResponse struct {
+	Feed   []TimelineFeedPost `json:"feed"`
+	Cursor string             `json:"cursor"`
+}
+
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
 // Profile is returned by app.bsky.actor.getProfile.

@@ -13,69 +13,218 @@ import (
 // EventHandler is a function that processes a Nostr event.
 type EventHandler func(ctx context.Context, event *nostr.Event)
 
-// RelayPool manages connections to one or more Nostr relays and subscribes
-// to events from a single author (the configured local Nostr user).
-type RelayPool struct {
-	readRelays   []string
-	writeRelays  []string
-	authorPubKey string
-	handler      EventHandler
-	sem          chan struct{} // limits concurrent event-handler goroutines
+const (
+	cbThreshold          = 3             // consecutive failures before circuit opens
+	cbCooldown           = 5 * time.Minute
+	relayEventConcurrency = 20
+)
+
+// relayCircuit is a per-relay circuit breaker.
+type relayCircuit struct {
+	mu        sync.Mutex
+	failCount int
+	openedAt  time.Time
+	open      bool
 }
 
-// relayEventConcurrency is the maximum number of event-handler goroutines that
-// may run simultaneously. Events arriving while all slots are occupied are
-// dropped with a warning rather than spawning unbounded goroutines.
-const relayEventConcurrency = 20
+// isOpen returns true when the circuit is open (relay should be bypassed).
+// Resets to closed once cbCooldown has elapsed (half-open retry).
+func (cb *relayCircuit) isOpen() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if !cb.open {
+		return false
+	}
+	if time.Since(cb.openedAt) >= cbCooldown {
+		cb.open = false
+		cb.failCount = 0
+		return false
+	}
+	return true
+}
 
-// NewRelayPool creates a relay pool that subscribes to events from authorPubKey.
-func NewRelayPool(readRelays, writeRelays []string, authorPubKey string, handler EventHandler) *RelayPool {
-	return &RelayPool{
-		readRelays:   readRelays,
-		writeRelays:  writeRelays,
-		authorPubKey: authorPubKey,
-		handler:      handler,
-		sem:          make(chan struct{}, relayEventConcurrency),
+// recordFailure increments the counter and opens the circuit at threshold.
+// Returns true the first time the circuit opens.
+func (cb *relayCircuit) recordFailure() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failCount++
+	if !cb.open && cb.failCount >= cbThreshold {
+		cb.open = true
+		cb.openedAt = time.Now()
+		return true
+	}
+	return false
+}
+
+// recordSuccess resets all failure state. Returns true if the circuit was open.
+func (cb *relayCircuit) recordSuccess() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	was := cb.open || cb.failCount > 0
+	cb.open = false
+	cb.failCount = 0
+	return was
+}
+
+// reset forcefully clears the circuit breaker state.
+func (cb *relayCircuit) reset() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.open = false
+	cb.failCount = 0
+}
+
+// RelayStatus describes a relay and its circuit-breaker state.
+type RelayStatus struct {
+	URL               string
+	CircuitOpen       bool
+	FailCount         int
+	CooldownRemaining int // seconds remaining until circuit resets
+}
+
+func (cb *relayCircuit) status(url string) RelayStatus {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	open := cb.open && time.Since(cb.openedAt) < cbCooldown
+	var remaining int
+	if open {
+		r := cbCooldown - time.Since(cb.openedAt)
+		if r > 0 {
+			remaining = int(r.Seconds())
+		}
+	}
+	return RelayStatus{
+		URL:               url,
+		CircuitOpen:       open,
+		FailCount:         cb.failCount,
+		CooldownRemaining: remaining,
 	}
 }
 
-// Start begins listening to the relay firehose. This blocks until ctx is cancelled.
-// It subscribes to events from the local author from now onwards.
+// ─── RelayPool ────────────────────────────────────────────────────────────────
+
+// RelayPool manages read-relay subscriptions for a single Nostr author.
+type RelayPool struct {
+	mu           sync.RWMutex
+	readRelays   []string
+	authorPubKey string
+	handler      EventHandler
+	sem          chan struct{}
+	restartCh    chan struct{} // closed/sent when relay list changes
+}
+
+// NewRelayPool creates a relay pool that subscribes to events from authorPubKey.
+// The writeRelays parameter is accepted for API compatibility but unused (Publisher handles writes).
+func NewRelayPool(readRelays, _ []string, authorPubKey string, handler EventHandler) *RelayPool {
+	return &RelayPool{
+		readRelays:   append([]string{}, readRelays...),
+		authorPubKey: authorPubKey,
+		handler:      handler,
+		sem:          make(chan struct{}, relayEventConcurrency),
+		restartCh:    make(chan struct{}, 1),
+	}
+}
+
+// AddRelay adds a relay to the read list and triggers an immediate subscription restart.
+// Returns false if the relay is already present.
+func (rp *RelayPool) AddRelay(url string) bool {
+	rp.mu.Lock()
+	for _, r := range rp.readRelays {
+		if r == url {
+			rp.mu.Unlock()
+			return false
+		}
+	}
+	rp.readRelays = append(rp.readRelays, url)
+	rp.mu.Unlock()
+	select {
+	case rp.restartCh <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// RemoveRelay removes a relay from the read list and triggers a restart.
+// Returns false if the relay was not in the list.
+func (rp *RelayPool) RemoveRelay(url string) bool {
+	rp.mu.Lock()
+	for i, r := range rp.readRelays {
+		if r == url {
+			rp.readRelays = append(rp.readRelays[:i], rp.readRelays[i+1:]...)
+			rp.mu.Unlock()
+			select {
+			case rp.restartCh <- struct{}{}:
+			default:
+			}
+			return true
+		}
+	}
+	rp.mu.Unlock()
+	return false
+}
+
+// Relays returns a copy of the current read relay list.
+func (rp *RelayPool) Relays() []string {
+	rp.mu.RLock()
+	defer rp.mu.RUnlock()
+	return append([]string{}, rp.readRelays...)
+}
+
+// Start begins listening to the relay firehose. Blocks until ctx is cancelled.
 func (rp *RelayPool) Start(ctx context.Context) {
-	if len(rp.readRelays) == 0 {
+	rp.mu.RLock()
+	empty := len(rp.readRelays) == 0
+	rp.mu.RUnlock()
+	if empty {
 		slog.Warn("no read relays configured; relay firehose is disabled")
 		<-ctx.Done()
 		return
 	}
 
-	slog.Info("starting relay firehose", "relays", rp.readRelays, "author", rp.authorPubKey[:8])
-
 	pool := nostr.NewSimplePool(ctx)
 	since := nostr.Now()
 
-	filters := nostr.Filters{{
-		Kinds:   []int{0, 1, 3, 5, 6, 7, 9735},
-		Authors: []string{rp.authorPubKey},
-		Since:   &since,
-		Limit:   0,
-	}}
-
 	for {
+		rp.mu.RLock()
+		relays := append([]string{}, rp.readRelays...)
+		rp.mu.RUnlock()
+
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		slog.Debug("subscribing to relay firehose", "relays", rp.readRelays)
+		slog.Info("starting relay firehose", "relays", relays, "author", rp.authorPubKey[:8])
 
-		for ev := range pool.SubMany(ctx, rp.readRelays, filters) {
+		filters := nostr.Filters{{
+			Kinds:   []int{0, 1, 3, 5, 6, 7, 9735},
+			Authors: []string{rp.authorPubKey},
+			Since:   &since,
+			Limit:   0,
+		}}
+
+		subCtx, subCancel := context.WithCancel(ctx)
+		immediateRestart := make(chan struct{}, 1)
+
+		// Forward relay-list-change signals to immediateRestart and cancel the subscription.
+		go func() {
+			select {
+			case <-rp.restartCh:
+				select {
+				case immediateRestart <- struct{}{}:
+				default:
+				}
+				subCancel()
+			case <-subCtx.Done():
+			}
+		}()
+
+		for ev := range pool.SubMany(subCtx, relays, filters) {
 			if ev.Event == nil {
 				continue
 			}
-			// Process event in a goroutine to avoid blocking the subscription.
-			// The semaphore caps concurrency; events that arrive while all slots
-			// are occupied are dropped with a warning instead of piling up.
 			event := ev.Event
 			select {
 			case rp.sem <- struct{}{}:
@@ -92,32 +241,139 @@ func (rp *RelayPool) Start(ctx context.Context) {
 				slog.Warn("relay event dropped: handler backlog full", "id", event.ID)
 			}
 		}
+		subCancel()
 
-		// If we exit the loop (relay disconnect), wait and reconnect.
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Relay list changed: restart immediately without the reconnect delay.
+		select {
+		case <-immediateRestart:
+			slog.Info("relay list updated, resubscribing", "relays", rp.Relays())
+			since = nostr.Now()
+			continue
+		default:
+		}
+
+		// Normal connection drop: wait before reconnecting.
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(5 * time.Second):
 			slog.Info("reconnecting to relay firehose")
 			since = nostr.Now()
-			filters[0].Since = &since
 		}
 	}
 }
 
-// Publisher publishes Nostr events to write relays.
+// ─── Publisher ────────────────────────────────────────────────────────────────
+
+// Publisher publishes Nostr events to write relays with per-relay circuit breakers.
+// A circuit opens after cbThreshold consecutive failures and stays open for cbCooldown,
+// preventing repeated connection attempts to unreachable relays.
 type Publisher struct {
-	writeRelays []string
-	pool        *nostr.SimplePool
-	poolOnce    sync.Once
+	mu       sync.RWMutex
+	relays   []string
+	circuits map[string]*relayCircuit
+	pool     *nostr.SimplePool
+	poolOnce sync.Once
 }
 
 // NewPublisher creates a new Publisher.
 func NewPublisher(writeRelays []string) *Publisher {
-	return &Publisher{writeRelays: writeRelays}
+	circuits := make(map[string]*relayCircuit, len(writeRelays))
+	for _, r := range writeRelays {
+		circuits[r] = &relayCircuit{}
+	}
+	return &Publisher{
+		relays:   append([]string{}, writeRelays...),
+		circuits: circuits,
+	}
 }
 
-// getPool returns the shared, lazily-initialised relay pool.
+// AddRelay adds a relay to the write list. Returns false if already present.
+func (p *Publisher) AddRelay(url string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, r := range p.relays {
+		if r == url {
+			return false
+		}
+	}
+	p.relays = append(p.relays, url)
+	p.circuits[url] = &relayCircuit{}
+	return true
+}
+
+// RemoveRelay removes a relay from the write list. Returns false if not found.
+func (p *Publisher) RemoveRelay(url string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, r := range p.relays {
+		if r == url {
+			p.relays = append(p.relays[:i], p.relays[i+1:]...)
+			delete(p.circuits, url)
+			return true
+		}
+	}
+	return false
+}
+
+// Relays returns a copy of the current write relay list.
+func (p *Publisher) Relays() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]string{}, p.relays...)
+}
+
+// RelayStatuses returns the circuit-breaker state for all configured relays.
+func (p *Publisher) RelayStatuses() []RelayStatus {
+	p.mu.RLock()
+	relays := append([]string{}, p.relays...)
+	circuits := make(map[string]*relayCircuit, len(p.circuits))
+	for k, v := range p.circuits {
+		circuits[k] = v
+	}
+	p.mu.RUnlock()
+
+	statuses := make([]RelayStatus, 0, len(relays))
+	for _, url := range relays {
+		if cb, ok := circuits[url]; ok {
+			statuses = append(statuses, cb.status(url))
+		} else {
+			statuses = append(statuses, RelayStatus{URL: url})
+		}
+	}
+	return statuses
+}
+
+// ResetCircuit clears the circuit-breaker state for a specific relay.
+func (p *Publisher) ResetCircuit(url string) {
+	p.mu.RLock()
+	cb := p.circuits[url]
+	p.mu.RUnlock()
+	if cb != nil {
+		cb.reset()
+		slog.Info("relay circuit breaker reset", "relay", url)
+	}
+}
+
+// getCircuit returns or creates a circuit breaker for the given relay URL.
+func (p *Publisher) getCircuit(url string) *relayCircuit {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cb, ok := p.circuits[url]; ok {
+		return cb
+	}
+	cb := &relayCircuit{}
+	p.circuits[url] = cb
+	return cb
+}
+
+// getPool returns the shared, lazily-initialised SimplePool.
 func (p *Publisher) getPool() *nostr.SimplePool {
 	p.poolOnce.Do(func() {
 		p.pool = nostr.NewSimplePool(context.Background())
@@ -126,21 +382,37 @@ func (p *Publisher) getPool() *nostr.SimplePool {
 }
 
 // Publish publishes an event to all configured write relays.
-// A fresh 15-second timeout is used for each publish attempt, decoupled from
-// the caller's context. This prevents short-lived or already-cancelled contexts
-// (HTTP request contexts, per-operation timeouts) from aborting relay delivery.
+// Relays with open circuits are skipped. If at least one relay succeeds, no error is returned.
+// An independent 15-second timeout is used so short-lived caller contexts don't abort delivery.
 func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
-	if len(p.writeRelays) == 0 {
+	p.mu.RLock()
+	allRelays := append([]string{}, p.relays...)
+	p.mu.RUnlock()
+
+	if len(allRelays) == 0 {
 		slog.Warn("no write relays configured; event not published", "id", event.ID, "kind", event.Kind)
 		return nil
 	}
 
-	// Honour explicit cancellation (e.g. SIGTERM) but otherwise use an
-	// independent deadline so relay reconnect + handshake time doesn't cause
-	// spurious "context canceled" failures.
+	// Skip relays with open circuits to avoid hammering unreachable endpoints.
+	active := make([]string, 0, len(allRelays))
+	for _, url := range allRelays {
+		if p.getCircuit(url).isOpen() {
+			slog.Debug("skipping relay with open circuit", "relay", url, "id", event.ID)
+		} else {
+			active = append(active, url)
+		}
+	}
+
+	if len(active) == 0 {
+		slog.Warn("all relay circuits are open; event not published",
+			"id", event.ID, "skipped", len(allRelays))
+		return fmt.Errorf("all %d relays have open circuits", len(allRelays))
+	}
+
+	// Honour explicit cancellation but otherwise use an independent deadline.
 	publishCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// Propagate explicit cancellation from the caller.
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -149,21 +421,34 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 		}
 	}()
 
-	results := p.getPool().PublishMany(publishCtx, p.writeRelays, *event)
-
 	var published, failed int
-	for result := range results {
+	for result := range p.getPool().PublishMany(publishCtx, active, *event) {
+		cb := p.getCircuit(result.RelayURL)
 		if result.Error != nil {
-			slog.Warn("failed to publish event", "relay", result.RelayURL, "id", event.ID, "error", result.Error)
+			justOpened := cb.recordFailure()
+			if justOpened {
+				slog.Warn("relay circuit opened; will retry in 5 minutes",
+					"relay", result.RelayURL, "error", result.Error)
+			} else if st := cb.status(result.RelayURL); !st.CircuitOpen {
+				// Below threshold: log the individual failure.
+				slog.Warn("failed to publish event",
+					"relay", result.RelayURL, "id", event.ID, "error", result.Error,
+					"fail_count", st.FailCount)
+			}
+			// Circuit already open (not just opened): suppress log to avoid spam.
 			failed++
 		} else {
+			wasOpen := cb.recordSuccess()
+			if wasOpen {
+				slog.Info("relay recovered", "relay", result.RelayURL)
+			}
 			slog.Debug("published event", "relay", result.RelayURL, "id", event.ID, "kind", event.Kind)
 			published++
 		}
 	}
 
 	if published == 0 && failed > 0 {
-		return fmt.Errorf("failed to publish to all %d relays", failed)
+		return fmt.Errorf("failed to publish to all %d active relays", failed)
 	}
 	return nil
 }

@@ -77,6 +77,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"fediverse_objects":   stats.FediverseObjects,
 		"bsky_objects":        stats.BskyObjects,
 		"bsky_last_seen":      stats.BskyLastSeen,
+		"bsky_last_poll":      stats.BskyLastPoll,
 		"total_objects":       stats.TotalObjects,
 		"last_resync_at":      stats.LastResyncAt,
 		"last_resync_count":   stats.LastResyncCount,
@@ -230,10 +231,19 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .qlink{font-size:11px;color:var(--blue);text-decoration:none;display:flex;align-items:center;gap:4px}
 .qlink:hover{text-decoration:underline}
 
-/* Relay tags */
-.relays-list{display:flex;flex-wrap:wrap;gap:6px}
-.relay-tag{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:3px 9px;font-size:11px;font-family:monospace;color:var(--muted);display:flex;align-items:center;gap:6px}
-.relay-dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
+/* Relay management */
+.relay-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.relay-row{display:flex;align-items:center;gap:7px;padding:5px 8px;background:var(--surface2);border-radius:5px;margin-bottom:3px}
+.relay-url{font-family:monospace;font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.relay-cb{font-size:10px;white-space:nowrap;padding:1px 6px;border-radius:3px;font-weight:500}
+.relay-cb-ok{background:rgba(63,185,80,.12);color:var(--green)}
+.relay-cb-warn{background:rgba(210,153,34,.12);color:var(--yellow)}
+.relay-cb-open{background:rgba(248,81,73,.12);color:var(--red)}
+.relay-acts{display:flex;gap:4px;flex-shrink:0}
+.rbtn{background:none;border:1px solid var(--border);border-radius:3px;padding:2px 7px;font-size:10px;cursor:pointer;color:var(--muted);font-family:inherit;transition:color .12s,border-color .12s}
+.rbtn:hover{color:var(--text);border-color:var(--muted)}
+.rbtn-red:hover{color:var(--red);border-color:var(--red)}
+.rbtn-blue:hover{color:var(--blue);border-color:var(--blue)}
 
 /* Bridge panels */
 .bridge-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
@@ -332,8 +342,15 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   </div>
 
   <div class="card">
-    <h2>Configured Relays</h2>
-    <div class="relays-list" id="relays-list"><span class="empty">loading…</span></div>
+    <h2>Relays</h2>
+    <div id="relays-list"><span class="empty">loading…</span></div>
+    <div style="display:flex;gap:7px;margin-top:10px">
+      <input type="text" id="relay-add-input" placeholder="wss://relay.example.com"
+        style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:5px 9px;color:var(--text);font-size:11px;font-family:monospace"
+        onkeydown="if(event.key==='Enter')addRelay()">
+      <button class="btn btn-surface" style="padding:5px 12px;font-size:11px" onclick="addRelay()">+ Add</button>
+    </div>
+    <div id="relay-msg" style="font-size:11px;color:var(--muted);margin-top:5px;min-height:15px"></div>
   </div>
 </div>
 
@@ -690,18 +707,8 @@ async function loadStatus() {
     document.getElementById('ql-wf').href = d.domain+'/.well-known/webfinger?resource=acct:'+d.username+'@'+wfHost;
   } catch {}
 
-  // Relay tags
-  const rl = document.getElementById('relays-list');
-  rl.innerHTML = '';
-  (d.relays||[]).forEach(relay => {
-    const t = document.createElement('span'); t.className='relay-tag';
-    t.innerHTML = '<span class="relay-dot"></span>'+esc(relay);
-    rl.appendChild(t);
-  });
-
-  // Nostr bridge panel
-  document.getElementById('bp-relays').textContent = (d.relays||[]).length;
-  document.getElementById('bp-npub').textContent   = d.npub ? d.npub.slice(0,20)+'…' : '—';
+  // Nostr bridge panel — relay count is filled by loadRelays()
+  document.getElementById('bp-npub').textContent = d.npub ? d.npub.slice(0,20)+'…' : '—';
 
   document.getElementById('bsky-sync-row').style.display = d.bsky_enabled ? '' : 'none';
   document.getElementById('import-bsky-card').style.display = d.bsky_enabled ? '' : 'none';
@@ -732,7 +739,8 @@ async function loadStats() {
       '<div class="bp-row"><span class="bpl">Status</span><span class="bpv"><span class="badge badge-green">active</span></span></div>'+
       '<div class="bp-row"><span class="bpl">Followers</span><span class="bpv big">'+esc(String(d.bsky_followers??'—'))+'</span></div>'+
       '<div class="bp-row"><span class="bpl">Objects</span><span class="bpv">'+esc(String(d.bsky_objects??'—'))+'</span></div>'+
-      '<div class="bp-row"><span class="bpl">Last sync</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_seen))+'</span></div>';
+      '<div class="bp-row"><span class="bpl">Last poll</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_poll))+'</span></div>'+
+      '<div class="bp-row"><span class="bpl">Last notification</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_seen))+'</span></div>';
   }
 
   // Total panel
@@ -848,7 +856,7 @@ async function refreshProfiles() {
 }
 
 function refreshAll() {
-  loadStats(); loadFollowers(); loadFollowing();
+  loadStats(); loadFollowers(); loadFollowing(); loadRelays();
   toast('Dashboard refreshed');
 }
 
@@ -1084,12 +1092,134 @@ async function importBskyFollowing() {
   }
 }
 
+// ── Relay management ─────────────────────────────────────────────────────────
+async function loadRelays() {
+  try {
+    const r = await fetch('/web/api/relays');
+    const relays = await r.json();
+    const rl = document.getElementById('relays-list');
+    rl.innerHTML = '';
+    if (!relays || relays.length === 0) {
+      rl.innerHTML = '<span class="empty">No relays configured.</span>';
+      document.getElementById('bp-relays').textContent = '0';
+      return;
+    }
+    document.getElementById('bp-relays').textContent = relays.length;
+    relays.forEach(relay => {
+      const row = document.createElement('div');
+      row.className = 'relay-row';
+      let dotColor = 'var(--green)';
+      let badge = '<span class="relay-cb relay-cb-ok">ok</span>';
+      if (relay.circuit_open) {
+        dotColor = 'var(--red)';
+        const secs = relay.cooldown_remaining_secs||0;
+        const cd = secs > 60 ? Math.floor(secs/60)+'m '+String(secs%60).padStart(2,'0')+'s' : secs+'s';
+        badge = '<span class="relay-cb relay-cb-open">circuit open · '+esc(cd)+'</span>';
+      } else if (relay.fail_count > 0) {
+        dotColor = 'var(--yellow)';
+        badge = '<span class="relay-cb relay-cb-warn">'+relay.fail_count+' fail(s)</span>';
+      }
+      const resetBtn = (relay.circuit_open || relay.fail_count > 0)
+        ? '<button class="rbtn rbtn-blue" onclick="resetCircuit(\''+esc(relay.url)+'\')">Reset</button>'
+        : '';
+      row.innerHTML =
+        '<span class="relay-dot" style="background:'+dotColor+'"></span>'+
+        '<span class="relay-url">'+esc(relay.url)+'</span>'+
+        badge+
+        '<div class="relay-acts">'+
+          resetBtn+
+          '<button class="rbtn" onclick="pingRelay(\''+esc(relay.url)+'\',this)">Test</button>'+
+          '<button class="rbtn rbtn-red" onclick="removeRelay(\''+esc(relay.url)+'\')">×</button>'+
+        '</div>';
+      rl.appendChild(row);
+    });
+  } catch(e) {
+    console.warn('loadRelays failed', e);
+  }
+}
+
+async function pingRelay(url, btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await fetch('/web/api/relays/test', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    const d = await r.json();
+    toast(d.ok ? '✓ '+url+' · '+d.latency+'ms' : '✗ '+url+': '+(d.error||'failed'));
+    loadRelays();
+  } catch(e) {
+    toast('Test failed: '+e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
+async function addRelay() {
+  const input = document.getElementById('relay-add-input');
+  const msg = document.getElementById('relay-msg');
+  const url = input.value.trim();
+  if (!url) return;
+  msg.textContent = 'Adding…';
+  try {
+    const r = await fetch('/web/api/relays', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    const d = await r.json();
+    if (r.ok) {
+      input.value = '';
+      msg.textContent = '';
+      toast(d.message || 'Done');
+      loadRelays();
+    } else {
+      msg.textContent = 'Error: '+(d||r.statusText);
+    }
+  } catch(e) {
+    msg.textContent = 'Error: '+e.message;
+  }
+}
+
+async function removeRelay(url) {
+  if (!confirm('Remove relay '+url+'?')) return;
+  try {
+    const r = await fetch('/web/api/relays', {
+      method: 'DELETE',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    const d = await r.json();
+    toast(d.message || (d.removed ? 'Removed' : 'Not found'));
+    loadRelays();
+  } catch(e) {
+    toast('Error: '+e.message);
+  }
+}
+
+async function resetCircuit(url) {
+  try {
+    await fetch('/web/api/relays/reset-circuit', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    toast('Circuit reset: '+url);
+    setTimeout(loadRelays, 300);
+  } catch(e) {
+    toast('Error: '+e.message);
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 // loadFollowing depends on bskyEnabled (set by loadStatus), so chain it.
 loadStatus().then(() => loadFollowing()).catch(e => console.error('loadFollowing failed', e));
-Promise.all([loadStats(), loadFollowers()]).catch(e => console.error('init failed', e));
+Promise.all([loadStats(), loadFollowers(), loadRelays()]).catch(e => console.error('init failed', e));
 
 setInterval(loadStats,    30000);
+setInterval(loadRelays,   15000);
 setInterval(updateUptime, 10000);
 
 // Load log on first visit.

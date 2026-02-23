@@ -222,13 +222,14 @@ func main() {
 
 	// ─── AP Handler (incoming ActivityPub → Nostr) ────────────────────────────
 	apHandler := &ap.APHandler{
-		LocalDomain:   cfg.LocalDomain,
-		LocalActorURL: localActorURL,
-		Signer:        signer,
-		Publisher:     publisher,
-		Store:         store,
-		Federator:     federator,
-		NostrRelay:    cfg.PrimaryRelay(),
+		LocalDomain:    cfg.LocalDomain,
+		LocalActorURL:  localActorURL,
+		Signer:         signer,
+		Publisher:      publisher,
+		Store:          store,
+		Federator:      federator,
+		NostrRelay:     cfg.PrimaryRelay(),
+		ShowSourceLink: cfg.ShowSourceLink,
 	}
 
 	// ─── Nostr Handler (incoming Nostr → ActivityPub) ─────────────────────────
@@ -260,14 +261,15 @@ func main() {
 			}
 			bskyTrigger = make(chan struct{}, 1)
 			poller := &bsky.Poller{
-				Client:        bskyClient,
-				Publisher:     publisher,
-				Signer:        signer,
-				Store:         store,
-				LocalPubKey:   cfg.NostrPublicKey,
-				LocalActorURL: localActorURL,
-				Interval:      30 * time.Second,
-				TriggerCh:     bskyTrigger,
+				Client:         bskyClient,
+				Publisher:      publisher,
+				Signer:         signer,
+				Store:          store,
+				LocalPubKey:    cfg.NostrPublicKey,
+				LocalActorURL:  localActorURL,
+				Interval:       30 * time.Second,
+				ShowSourceLink: cfg.ShowSourceLink,
+				TriggerCh:      bskyTrigger,
 			}
 			go poller.Start(ctx)
 			slog.Info("bsky bridge enabled", "identifier", cfg.BskyIdentifier)

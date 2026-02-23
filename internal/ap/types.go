@@ -111,6 +111,7 @@ type Note struct {
 	CC           []string     `json:"cc,omitempty"`
 	Tag          []interface{} `json:"tag,omitempty"`
 	Attachment   []Attachment `json:"attachment,omitempty"`
+	URL          string       `json:"url,omitempty"`
 	InReplyTo    string       `json:"inReplyTo,omitempty"`
 	QuoteURL     string       `json:"quoteUrl,omitempty"`
 	Sensitive    bool         `json:"sensitive,omitempty"`

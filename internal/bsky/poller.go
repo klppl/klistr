@@ -54,9 +54,10 @@ type Poller struct {
 	Publisher     Publisher
 	Signer        Signer
 	Store         PollerStore
-	LocalPubKey   string
-	LocalActorURL string // used to record inbound Bluesky followers
-	Interval      time.Duration
+	LocalPubKey    string
+	LocalActorURL  string // used to record inbound Bluesky followers
+	Interval       time.Duration
+	ShowSourceLink bool // append bsky.app post URL at the bottom of bridged notes
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
 	TriggerCh <-chan struct{}
 }
@@ -203,7 +204,7 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 	}
 
 	record, _ := post.Record.(map[string]interface{})
-	content, _ := record["text"].(string)
+	content := extractContentFromRecord(record)
 
 	// Parse the post's own createdAt; fall back to indexedAt.
 	var createdAt nostr.Timestamp
@@ -232,6 +233,20 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		}
 	}
 
+	// Attach image blobs as NIP-94 imeta tags and append CDN URLs to content.
+	for _, img := range extractImagesFromRecord(record, post.Author.DID) {
+		tags = append(tags, buildImeta(img))
+		content += "\n\n" + img.URL
+	}
+
+	// Append the original bsky.app URL when ShowSourceLink is enabled.
+	if p.ShowSourceLink {
+		sourceURL := atURIToHTTPS(post.URI)
+		if !strings.Contains(content, sourceURL) {
+			content += "\n\n🔗 " + sourceURL
+		}
+	}
+
 	event := &nostr.Event{
 		Kind:      1,
 		Content:   content,
@@ -254,6 +269,21 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		slog.Warn("bsky poller: timeline: store mapping failed", "uri", post.URI, "error", err)
 	}
 	slog.Info("bsky poller: bridged timeline post", "author", post.Author.Handle, "uri", post.URI)
+}
+
+// buildImeta constructs a NIP-94 imeta tag from a Bluesky ImageInfo.
+func buildImeta(img ImageInfo) nostr.Tag {
+	parts := []string{"imeta", "url " + img.URL}
+	if img.MimeType != "" {
+		parts = append(parts, "m "+img.MimeType)
+	}
+	if img.Width > 0 && img.Height > 0 {
+		parts = append(parts, fmt.Sprintf("dim %dx%d", img.Width, img.Height))
+	}
+	if img.Alt != "" {
+		parts = append(parts, "alt "+img.Alt)
+	}
+	return nostr.Tag(parts)
 }
 
 // resolveReplyRefs looks up Nostr event IDs for the parent and root of a
@@ -383,20 +413,37 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 	// their profile and link back to the original Bluesky account.
 	p.publishBskyAuthorProfile(ctx, n)
 
-	content := extractNotifText(n)
+	record, _ := n.Record.(map[string]interface{})
+	content := extractContentFromRecord(record)
+
+	// Use 2-element e-tags (no relay hint) to satisfy strict relay schemas.
+	// Positional convention (NIP-10): first = root, last = direct parent.
+	// proxy tag prevents the outbound Bluesky bridge from re-posting this.
+	replyTags := nostr.Tags{
+		{"e", rootNostrID},
+		{"e", parentNostrID},
+		{"p", p.LocalPubKey},
+		{"proxy", n.URI, "atproto"},
+	}
+	// Attach image blobs as NIP-94 imeta tags and append CDN URLs to content.
+	for _, img := range extractImagesFromRecord(record, n.Author.DID) {
+		replyTags = append(replyTags, buildImeta(img))
+		content += "\n\n" + img.URL
+	}
+
+	// Append the original bsky.app URL when ShowSourceLink is enabled.
+	if p.ShowSourceLink {
+		sourceURL := atURIToHTTPS(n.URI)
+		if !strings.Contains(content, sourceURL) {
+			content += "\n\n🔗 " + sourceURL
+		}
+	}
+
 	event := &nostr.Event{
 		Kind:      1,
 		Content:   content,
 		CreatedAt: nostr.Now(),
-		Tags: nostr.Tags{
-			// Use 2-element e-tags (no relay hint) to satisfy strict relay schemas.
-			// Positional convention (NIP-10): first = root, last = direct parent.
-			{"e", rootNostrID},
-			{"e", parentNostrID},
-			{"p", p.LocalPubKey},
-			// proxy tag prevents the outbound Bluesky bridge from re-posting this.
-			{"proxy", n.URI, "atproto"},
-		},
+		Tags:      replyTags,
 	}
 
 	// Sign with a derived key for the Bluesky author's DID, giving them a

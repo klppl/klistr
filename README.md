@@ -29,9 +29,9 @@ Fediverse user → POST /inbox        Bluesky notification poll (30s)
 
 ### Protocol mapping
 
-| ActivityPub | Nostr Kind | Notes |
+| ActivityPub → Nostr | Kind | Notes |
 |---|---|---|
-| `Create(Note)` | `1` | Text posts |
+| `Create(Note)` | `1` | Text posts; threaded replies; images as NIP-94 `imeta` tags; anchor-text links appended to content |
 | `Announce` | `6` | Reposts |
 | `Update(Actor)` | `0` | Profile updates |
 | `Like` | `7` (`+`) | Reactions |
@@ -215,17 +215,21 @@ Restart klistr. You should see this log line on startup:
 | Kind 6 (repost) | Reposts (if the original was bridged) |
 | Kind 7 `+` (like) | Likes (if the original was bridged) |
 
-| Bluesky notification | Nostr event |
+| Bluesky → Nostr | How |
 |---|---|
+| Posts from accounts you follow | Kind 1 (signed with a derived key per Bluesky author); threaded if parent is known |
+| Reply to your post | Threaded Kind 1 reply (signed with a derived key for the Bluesky author), or NIP-04 DM if the parent post isn't bridged |
 | Like on your post | Kind 7 reaction |
 | Repost of your post | Kind 6 repost |
-| Reply to your post | Threaded Kind 1 reply (signed with a derived key for the Bluesky author), or NIP-04 DM if the parent post isn't bridged |
 | Mention / quote | NIP-04 DM notification to yourself |
 | New follower | NIP-04 DM notification to yourself |
+| Images (`app.bsky.embed.images`) | NIP-94 `imeta` tags + CDN image URL appended to content |
+| Facet links (anchor text) | URL appended to content if not already visible in text |
+| Link cards (`embed.external`) | URL appended to content if not already visible in text |
 
 **Notes:**
 - Long Nostr posts (> 300 characters) are truncated and a link to the full post on njump.me is appended.
-- Bluesky is polled every 30 seconds for new notifications.
+- Bluesky is polled every 30 seconds for new notifications and timeline posts.
 - The bridge stores AT URIs in the same database table as ActivityPub IDs, so likes/reposts/deletes and reply threading can be correctly linked.
 - Replying from Nostr to a bridged Bluesky reply will thread correctly back into the Bluesky conversation.
 
@@ -240,7 +244,7 @@ Set `WEB_ADMIN=<password>` to enable a dashboard at `https://your-domain.com/web
 | Section | What it shows |
 |---|---|
 | **Node** | Domain, username, npub (with copy button), Bluesky status, uptime. Quick links to AP profile, Nostr profile (njump), WebFinger. |
-| **Configured Relays** | All relays from `NOSTR_RELAY`. |
+| **Configured Relays** | Live relay list with circuit-breaker status (OK / degraded / open). Per-relay Test (ping), Reset circuit, and Remove buttons. Add new relays at runtime. Changes persist across restarts. |
 | **Bridge Activity** | Per-bridge stat panels — Nostr (relay count), Fediverse (followers, known actors, bridged objects), Bluesky (status, bridged objects, last sync time), Total. |
 | **Fediverse Followers** | List of everyone following you on the Fediverse, shown as `@user@domain`. |
 | **Following** | Two-column panel (Fediverse \| Bluesky) showing who you follow on each bridge, with per-row unfollow buttons and an add-handle input. Fediverse: WebFinger-resolves the handle and publishes a kind-3; ActivityPub Follow is sent automatically. Bluesky: creates the follow record on Bluesky and updates the kind-3. Bluesky panel is disabled when the bridge is not configured. |
@@ -270,6 +274,7 @@ Set `WEB_ADMIN=<password>` to enable a dashboard at `https://your-domain.com/web
 | `BSKY_APP_PASSWORD` | — | No | Bluesky app password (Settings → App Passwords) |
 | `EXTERNAL_BASE_URL` | `https://njump.me` | No | Base URL for Nostr links (used in truncated Bluesky posts) |
 | `WEB_ADMIN` | — | No | Password for the web admin UI at `/web` (HTTP Basic Auth). Omit to disable entirely. |
+| `SHOW_SOURCE_LINK` | `false` | No | Append the original post URL (`🔗 https://…`) at the bottom of every bridged note. |
 
 ---
 

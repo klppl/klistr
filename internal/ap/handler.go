@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,8 +32,9 @@ type APHandler struct {
 		RemoveFollow(followerID, followedID string) error
 		GetNostrIDForObject(apID string) (string, bool)
 	}
-	Federator  *Federator
-	NostrRelay string
+	Federator      *Federator
+	NostrRelay     string
+	ShowSourceLink bool // append original post URL at the bottom of bridged notes
 }
 
 // HandleActivity processes an incoming ActivityPub activity.
@@ -384,6 +386,9 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 	}
 
 	// Add p-tags for mentions.
+	// While iterating, collect mention actor URLs so we can exclude them when
+	// appending hidden href links below (we don't want profile URLs cluttering content).
+	mentionHrefs := make(map[string]bool)
 	for _, tag := range note.Tag {
 		m, ok := tag.(map[string]interface{})
 		if !ok {
@@ -392,10 +397,30 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		tagType, _ := m["type"].(string)
 		if tagType == "Mention" {
 			href, _ := m["href"].(string)
+			if href != "" {
+				mentionHrefs[href] = true
+			}
 			nostrPubkey, err := h.Signer.PublicKey(href)
 			if err == nil {
 				event.Tags = append(event.Tags, nostr.Tag{"p", nostrPubkey, h.NostrRelay})
 			}
+		}
+	}
+
+	// Append any <a href> URLs that are hidden behind anchor text and not yet
+	// visible in the stripped plaintext. Skip mention actor URLs and Mastodon-style
+	// hashtag search paths (/tags/ or /tag/) which would pollute the content.
+	seen := make(map[string]bool)
+	for _, href := range extractHrefsFromHTML(note.Content) {
+		if seen[href] || mentionHrefs[href] {
+			continue
+		}
+		if strings.Contains(href, "/tags/") || strings.Contains(href, "/tag/") {
+			continue
+		}
+		if !strings.Contains(content, href) {
+			content += "\n\n" + href
+			seen[href] = true
 		}
 	}
 
@@ -450,6 +475,19 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		}
 		event.Tags = append(event.Tags, nostr.Tag(imeta))
 		content += "\n\n" + att.URL
+	}
+
+	// Append the original post URL when ShowSourceLink is enabled.
+	// Prefer the human-readable `url` field (e.g. https://mastodon.social/@alice/123)
+	// over the AP object `id`, which may be a less friendly URL on some servers.
+	if h.ShowSourceLink {
+		sourceURL := note.URL
+		if sourceURL == "" {
+			sourceURL = note.ID
+		}
+		if sourceURL != "" && !strings.Contains(content, sourceURL) {
+			content += "\n\n🔗 " + sourceURL
+		}
 	}
 
 	event.Content = content
@@ -656,6 +694,22 @@ func buildMetadataContentFromActor(actor *Actor) string {
 	return buildMetadataContent(actor)
 }
 
+
+// anchorHrefRe matches the href attribute value inside an <a> tag,
+// restricted to http/https URLs (skips mailto:, javascript:, etc.).
+var anchorHrefRe = regexp.MustCompile(`(?i)<a\s[^>]*\bhref\s*=\s*["'](https?://[^"']+)["']`)
+
+// extractHrefsFromHTML returns all http/https hrefs from <a> tags in the HTML.
+func extractHrefsFromHTML(html string) []string {
+	matches := anchorHrefRe.FindAllStringSubmatch(html, -1)
+	var hrefs []string
+	for _, m := range matches {
+		if len(m) >= 2 {
+			hrefs = append(hrefs, m[1])
+		}
+	}
+	return hrefs
+}
 
 func jsonEscape(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)

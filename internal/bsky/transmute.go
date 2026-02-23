@@ -274,7 +274,70 @@ func extractReplyRefs(n *Notification) (parentURI, rootURI string) {
 	return
 }
 
+// extractContentFromRecord extracts bridgeable text content from a Bluesky
+// post record map. It reads the plain "text" field and then appends any link
+// URIs that only appear in rich-text facets (anchor-text links) or in an
+// external embed (link card) but are absent from the plain text. This ensures
+// that "click here → https://…" style links are not silently dropped.
+func extractContentFromRecord(record map[string]interface{}) string {
+	if record == nil {
+		return ""
+	}
+	text, _ := record["text"].(string)
+
+	seen := make(map[string]bool)
+	var extraLinks []string
+
+	addLink := func(uri string) {
+		if uri == "" || strings.Contains(text, uri) || seen[uri] {
+			return
+		}
+		seen[uri] = true
+		extraLinks = append(extraLinks, uri)
+	}
+
+	// Rich-text facet links (anchor text whose URL is only in the facets).
+	if facets, ok := record["facets"].([]interface{}); ok {
+		for _, f := range facets {
+			facet, ok := f.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			features, ok := facet["features"].([]interface{})
+			if !ok {
+				continue
+			}
+			for _, feat := range features {
+				feature, ok := feat.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if ftype, _ := feature["$type"].(string); ftype == facetLinkType {
+					uri, _ := feature["uri"].(string)
+					addLink(uri)
+				}
+			}
+		}
+	}
+
+	// External embed / link card.
+	if embed, ok := record["embed"].(map[string]interface{}); ok {
+		if embedType, _ := embed["$type"].(string); embedType == "app.bsky.embed.external" {
+			if ext, ok := embed["external"].(map[string]interface{}); ok {
+				uri, _ := ext["uri"].(string)
+				addLink(uri)
+			}
+		}
+	}
+
+	if len(extraLinks) == 0 {
+		return text
+	}
+	return text + "\n\n" + strings.Join(extraLinks, "\n")
+}
+
 // extractNotifText attempts to pull the text from a notification record.
+// Prefer extractContentFromRecord when the record map is already available.
 func extractNotifText(n *Notification) string {
 	if n.Record == nil {
 		return ""
@@ -283,10 +346,89 @@ func extractNotifText(n *Notification) string {
 	if !ok {
 		return ""
 	}
-	if text, ok := m["text"].(string); ok {
-		return text
+	return extractContentFromRecord(m)
+}
+
+// ─── Image extraction (Bluesky → Nostr) ──────────────────────────────────────
+
+// ImageInfo holds metadata for a bridged Bluesky image attachment.
+type ImageInfo struct {
+	URL      string
+	Alt      string
+	MimeType string
+	Width    int
+	Height   int
+}
+
+// blobToCDNURL constructs a Bluesky CDN URL for a blob.
+// authorDID is the post author's DID; cid is the blob's $link value.
+func blobToCDNURL(authorDID, cid, mimeType string) string {
+	format := "jpeg"
+	if parts := strings.SplitN(mimeType, "/", 2); len(parts) == 2 && parts[1] != "" {
+		format = parts[1]
 	}
-	return ""
+	return fmt.Sprintf("https://cdn.bsky.app/img/feed_fullsize/plain/%s/%s@%s", authorDID, cid, format)
+}
+
+// extractImagesFromRecord returns ImageInfo for every image in an
+// app.bsky.embed.images embed block. authorDID is required to construct
+// CDN blob URLs. Returns nil if the record has no image embed.
+func extractImagesFromRecord(record map[string]interface{}, authorDID string) []ImageInfo {
+	if record == nil || authorDID == "" {
+		return nil
+	}
+	embed, ok := record["embed"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if embedType, _ := embed["$type"].(string); embedType != "app.bsky.embed.images" {
+		return nil
+	}
+	images, ok := embed["images"].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	var result []ImageInfo
+	for _, img := range images {
+		image, ok := img.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		blob, ok := image["image"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ref, ok := blob["ref"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cid, _ := ref["$link"].(string)
+		if cid == "" {
+			continue
+		}
+		mimeType, _ := blob["mimeType"].(string)
+		alt, _ := image["alt"].(string)
+
+		var width, height int
+		if ar, ok := image["aspectRatio"].(map[string]interface{}); ok {
+			if w, ok := ar["width"].(float64); ok {
+				width = int(w)
+			}
+			if h, ok := ar["height"].(float64); ok {
+				height = int(h)
+			}
+		}
+
+		result = append(result, ImageInfo{
+			URL:      blobToCDNURL(authorDID, cid, mimeType),
+			Alt:      alt,
+			MimeType: mimeType,
+			Width:    width,
+			Height:   height,
+		})
+	}
+	return result
 }
 
 // RKeyFromURI extracts the rkey from an AT URI (at://did/collection/rkey).

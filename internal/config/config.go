@@ -34,6 +34,7 @@ type Config struct {
 	BskyIdentifier    string // BSKY_IDENTIFIER env var (handle or DID)
 	BskyAppPassword   string // BSKY_APP_PASSWORD env var
 	WebAdminPassword  string // WEB_ADMIN env var — enables /web admin UI when set
+	ShowSourceLink    bool   // SHOW_SOURCE_LINK env var — append original post URL to bridged notes
 }
 
 // BskyEnabled returns true if Bluesky bridge credentials are configured.
@@ -107,7 +108,14 @@ func Load() *Config {
 		BskyIdentifier:    os.Getenv("BSKY_IDENTIFIER"),
 		BskyAppPassword:   os.Getenv("BSKY_APP_PASSWORD"),
 		WebAdminPassword:  os.Getenv("WEB_ADMIN"),
+		ShowSourceLink:    getEnvBool("SHOW_SOURCE_LINK"),
 	}
+}
+
+// getEnvBool returns true if the env var is "true" or "1" (case-insensitive).
+func getEnvBool(key string) bool {
+	v := strings.ToLower(os.Getenv(key))
+	return v == "true" || v == "1"
 }
 
 // URL returns the parsed local domain as a *url.URL.

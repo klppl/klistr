@@ -290,6 +290,7 @@ func mapToNote(m map[string]interface{}) *Note {
 		AttributedTo: getString(m, "attributedTo"),
 		Content:      getString(m, "content"),
 		Published:    getString(m, "published"),
+		URL:          getString(m, "url"),
 		InReplyTo:    getString(m, "inReplyTo"),
 		QuoteURL:     getString(m, "quoteUrl"),
 		Summary:      getString(m, "summary"),

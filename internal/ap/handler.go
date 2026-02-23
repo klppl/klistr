@@ -128,12 +128,18 @@ func (h *APHandler) handleCreate(ctx context.Context, activity IncomingActivity)
 		return nil // Only handle public notes
 	}
 
-	// Prefetch referenced objects.
-	if note.QuoteURL != "" {
-		go h.fetchAndCacheObject(context.Background(), note.QuoteURL)
-	}
+	// Synchronously fetch parent posts before converting so that reply and
+	// quote e/q-tags can be resolved. Without this, a thread reply would
+	// arrive before its parent is cached and the tag would be silently dropped.
 	if note.InReplyTo != "" {
-		go h.fetchAndCacheObject(context.Background(), note.InReplyTo)
+		if _, ok := h.resolveNostrID(note.InReplyTo); !ok {
+			h.fetchAndCacheObject(ctx, note.InReplyTo)
+		}
+	}
+	if note.QuoteURL != "" {
+		if _, ok := h.resolveNostrID(note.QuoteURL); !ok {
+			h.fetchAndCacheObject(ctx, note.QuoteURL)
+		}
 	}
 
 	event, err := h.noteToEvent(ctx, note)
@@ -167,12 +173,18 @@ func (h *APHandler) handleAnnounce(ctx context.Context, activity IncomingActivit
 		objectID, _ = objMap["id"].(string)
 	}
 
-	go h.fetchAndCacheObject(context.Background(), objectID)
+	// Synchronously fetch the announced object so we can reference its Nostr ID.
+	// Without this, the async goroutine would race against GetNostrIDForObject
+	// and the repost would always be silently dropped.
+	if _, ok := h.Store.GetNostrIDForObject(objectID); !ok {
+		h.fetchAndCacheObject(ctx, objectID)
+	}
 
 	// Create a Nostr kind-6 repost event.
 	nostrID, ok := h.Store.GetNostrIDForObject(objectID)
 	if !ok {
-		return nil // Can't repost without knowing the Nostr ID
+		slog.Debug("announce: cannot resolve Nostr ID for announced object", "object", objectID)
+		return nil
 	}
 
 	event := &nostr.Event{
@@ -389,21 +401,19 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 
 	// Add reply tag.
 	if note.InReplyTo != "" {
-		replyNostrID, ok := h.resolveNostrID(note.InReplyTo)
-		if !ok {
-			// Can't resolve parent; skip this note.
-			return nil, nil
+		if replyNostrID, ok := h.resolveNostrID(note.InReplyTo); ok {
+			event.Tags = append(event.Tags, nostr.Tag{"e", replyNostrID, h.NostrRelay, "reply"})
 		}
-		event.Tags = append(event.Tags, nostr.Tag{"e", replyNostrID, h.NostrRelay, "reply"})
+		// If parent is unresolvable, publish without the reply tag so the post
+		// is not silently dropped — the content is still preserved.
 	}
 
 	// Add quote tag.
 	if note.QuoteURL != "" {
-		quoteNostrID, ok := h.resolveNostrID(note.QuoteURL)
-		if !ok {
-			return nil, nil
+		if quoteNostrID, ok := h.resolveNostrID(note.QuoteURL); ok {
+			event.Tags = append(event.Tags, nostr.Tag{"q", quoteNostrID, h.NostrRelay})
 		}
-		event.Tags = append(event.Tags, nostr.Tag{"q", quoteNostrID, h.NostrRelay})
+		// If unresolvable, the quoted URL is typically already present in the note content.
 	}
 
 	// Add hashtags.

@@ -319,6 +319,31 @@ func mapToNote(m map[string]interface{}) *Note {
 		}
 	}
 
+	// Extract tag array (mentions, hashtags, emoji).
+	if tags, ok := m["tag"].([]interface{}); ok {
+		note.Tag = tags
+	}
+
+	// Extract media attachments.
+	if atts, ok := m["attachment"].([]interface{}); ok {
+		for _, att := range atts {
+			a, ok := att.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			width, _ := a["width"].(float64)
+			height, _ := a["height"].(float64)
+			note.Attachment = append(note.Attachment, Attachment{
+				Type:      getString(a, "type"),
+				URL:       getString(a, "url"),
+				MediaType: getString(a, "mediaType"),
+				Blurhash:  getString(a, "blurhash"),
+				Width:     int(width),
+				Height:    int(height),
+			})
+		}
+	}
+
 	return note
 }
 

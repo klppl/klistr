@@ -49,8 +49,9 @@ func (h *APHandler) HandleActivity(ctx context.Context, raw json.RawMessage) err
 	)
 
 	// Fetch and cache the actor so they're available in Nostr.
+	// Use context.Background() so this goroutine outlives the HTTP handler's context.
 	if activity.Type != "Update" {
-		go h.fetchAndCacheActor(ctx, activity.Actor)
+		go h.fetchAndCacheActor(context.Background(), activity.Actor)
 	}
 
 	switch activity.Type {
@@ -89,7 +90,7 @@ func (h *APHandler) handleFollow(ctx context.Context, activity IncomingActivity)
 	}
 
 	// Publish updated contact list to Nostr.
-	go h.publishFollows(ctx, activity.Actor)
+	go h.publishFollows(context.Background(), activity.Actor)
 
 	// Send Accept back to the follower.
 	accept := BuildAccept(map[string]interface{}{
@@ -99,10 +100,13 @@ func (h *APHandler) handleFollow(ctx context.Context, activity IncomingActivity)
 		"object": followedID,
 	}, followedID, activity.Actor)
 
-	go h.Federator.Federate(ctx, accept)
+	// Use context.Background() for fire-and-forget goroutines: handleFollow returns nil
+	// immediately, which causes the HTTP handler goroutine (and its 30s ctx) to exit,
+	// cancelling the context before these goroutines can complete their work.
+	go h.Federator.Federate(context.Background(), accept)
 
 	// Notify local user of the new Fediverse follower via a DM to self.
-	go h.sendFollowNotification(ctx, activity.Actor)
+	go h.sendFollowNotification(context.Background(), activity.Actor)
 
 	return nil
 }
@@ -126,10 +130,10 @@ func (h *APHandler) handleCreate(ctx context.Context, activity IncomingActivity)
 
 	// Prefetch referenced objects.
 	if note.QuoteURL != "" {
-		go h.fetchAndCacheObject(ctx, note.QuoteURL)
+		go h.fetchAndCacheObject(context.Background(), note.QuoteURL)
 	}
 	if note.InReplyTo != "" {
-		go h.fetchAndCacheObject(ctx, note.InReplyTo)
+		go h.fetchAndCacheObject(context.Background(), note.InReplyTo)
 	}
 
 	event, err := h.noteToEvent(ctx, note)
@@ -163,7 +167,7 @@ func (h *APHandler) handleAnnounce(ctx context.Context, activity IncomingActivit
 		objectID, _ = objMap["id"].(string)
 	}
 
-	go h.fetchAndCacheObject(ctx, objectID)
+	go h.fetchAndCacheObject(context.Background(), objectID)
 
 	// Create a Nostr kind-6 repost event.
 	nostrID, ok := h.Store.GetNostrIDForObject(objectID)
@@ -229,7 +233,7 @@ func (h *APHandler) handleUpdate(ctx context.Context, activity IncomingActivity)
 		},
 	}
 	if err := h.signEvent(relayEvent, actor.ID); err == nil {
-		go h.Publisher.Publish(ctx, relayEvent)
+		go h.Publisher.Publish(context.Background(), relayEvent)
 	}
 
 	return h.Publisher.Publish(ctx, event)

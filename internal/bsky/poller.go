@@ -239,11 +239,15 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		content += "\n\n" + img.URL
 	}
 
-	// Append the original bsky.app URL when ShowSourceLink is enabled.
+	// Source link attribution: full URL in an r-tag (won't trigger embed),
+	// bare hostname only in the content (not a full URL → no preview card).
 	if p.ShowSourceLink {
 		sourceURL := atURIToHTTPS(post.URI)
 		if !strings.Contains(content, sourceURL) {
-			content += "\n\n🔗 " + sourceURL
+			tags = append(tags, nostr.Tag{"r", sourceURL})
+			if host := hostOf(sourceURL); host != "" {
+				content += "\n\n🔗 " + host
+			}
 		}
 	}
 
@@ -269,6 +273,18 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		slog.Warn("bsky poller: timeline: store mapping failed", "uri", post.URI, "error", err)
 	}
 	slog.Info("bsky poller: bridged timeline post", "author", post.Author.Handle, "uri", post.URI)
+}
+
+// hostOf extracts the hostname from a URL string (e.g. "https://bsky.app/..." → "bsky.app").
+func hostOf(rawURL string) string {
+	if i := strings.Index(rawURL, "://"); i >= 0 {
+		rest := rawURL[i+3:]
+		if j := strings.IndexByte(rest, '/'); j >= 0 {
+			return rest[:j]
+		}
+		return rest
+	}
+	return ""
 }
 
 // buildImeta constructs a NIP-94 imeta tag from a Bluesky ImageInfo.
@@ -431,11 +447,15 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		content += "\n\n" + img.URL
 	}
 
-	// Append the original bsky.app URL when ShowSourceLink is enabled.
+	// Source link attribution: full URL in an r-tag (won't trigger embed),
+	// bare hostname only in the content (not a full URL → no preview card).
 	if p.ShowSourceLink {
 		sourceURL := atURIToHTTPS(n.URI)
 		if !strings.Contains(content, sourceURL) {
-			content += "\n\n🔗 " + sourceURL
+			replyTags = append(replyTags, nostr.Tag{"r", sourceURL})
+			if host := hostOf(sourceURL); host != "" {
+				content += "\n\n🔗 " + host
+			}
 		}
 	}
 

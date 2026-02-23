@@ -1108,6 +1108,7 @@ async function loadRelays() {
     relays.forEach(relay => {
       const row = document.createElement('div');
       row.className = 'relay-row';
+      row.dataset.url = relay.url;
       let dotColor = 'var(--green)';
       let badge = '<span class="relay-cb relay-cb-ok">ok</span>';
       if (relay.circuit_open) {
@@ -1149,7 +1150,27 @@ async function pingRelay(url, btn) {
     });
     const d = await r.json();
     toast(d.ok ? '✓ '+url+' · '+d.latency+'ms' : '✗ '+url+': '+(d.error||'failed'));
-    loadRelays();
+    // Update the badge in-place so the test result is immediately visible.
+    // Do NOT call loadRelays() here — the circuit-breaker state on the server
+    // is unaffected by a manual test, so reloading would reset the badge to
+    // "ok" even when the test just reported a failure.
+    const row = document.querySelector('.relay-row[data-url="'+url.replace(/"/g,'&quot;')+'"]');
+    if (row) {
+      const dot = row.querySelector('.relay-dot');
+      const existingBadge = row.querySelector('.relay-cb');
+      let badge, dotColor;
+      if (d.ok) {
+        dotColor = 'var(--green)';
+        badge = '<span class="relay-cb relay-cb-ok">✓ '+d.latency+'ms</span>';
+      } else {
+        dotColor = 'var(--red)';
+        // Truncate long errors to keep the row tidy.
+        const short = (d.error||'failed').replace(/^error opening websocket[^:]*:\s*/i,'').slice(0,60);
+        badge = '<span class="relay-cb relay-cb-open">✗ '+esc(short)+'</span>';
+      }
+      if (dot) dot.style.background = dotColor;
+      if (existingBadge) existingBadge.outerHTML = badge;
+    }
   } catch(e) {
     toast('Test failed: '+e.message);
   } finally {

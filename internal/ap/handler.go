@@ -463,6 +463,19 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 
 	// Media attachments.
 	for _, att := range note.Attachment {
+		if att.URL == "" {
+			continue
+		}
+		// Link-card previews (type "Link", mediaType "text/html") are not
+		// media files. Append their URL to content so the article gets
+		// embedded in Nostr clients, but skip the imeta tag (imeta is for
+		// actual media — images/video/audio).
+		if att.Type == "Link" || strings.HasPrefix(att.MediaType, "text/") {
+			if !strings.Contains(content, att.URL) {
+				content += "\n\n" + att.URL
+			}
+			continue
+		}
 		imeta := []string{"imeta", "url " + att.URL}
 		if att.MediaType != "" {
 			imeta = append(imeta, "m "+att.MediaType)
@@ -477,16 +490,21 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		content += "\n\n" + att.URL
 	}
 
-	// Append the original post URL when ShowSourceLink is enabled.
-	// Prefer the human-readable `url` field (e.g. https://mastodon.social/@alice/123)
-	// over the AP object `id`, which may be a less friendly URL on some servers.
+	// Source link attribution when ShowSourceLink is enabled.
+	// Full URL goes into an r-tag so Nostr clients that support it can link back.
+	// Only the bare hostname (e.g. "mastodon.social") goes into the content — a
+	// hostname without a scheme is not treated as an embeddable URL by Nostr
+	// clients, so it won't overshadow the actual links shared in the post.
 	if h.ShowSourceLink {
 		sourceURL := note.URL
 		if sourceURL == "" {
 			sourceURL = note.ID
 		}
 		if sourceURL != "" && !strings.Contains(content, sourceURL) {
-			content += "\n\n🔗 " + sourceURL
+			event.Tags = append(event.Tags, nostr.Tag{"r", sourceURL})
+			if host := extractDomain(sourceURL); host != "" {
+				content += "\n\n🔗 " + host
+			}
 		}
 	}
 

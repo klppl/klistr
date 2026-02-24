@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+
+	"github.com/klppl/klistr/internal/bridge"
 )
 
 // kvLastSeenKey stores the indexedAt timestamp of the most-recently processed
@@ -221,42 +223,37 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		}
 	}
 
-	tags := nostr.Tags{{"proxy", post.URI, "atproto"}}
-
 	// Thread reply posts if the parent is already bridged.
+	var replyToID, rootID string
+	var mentionPubkeys []string
 	if replyBlock, ok := record["reply"].(map[string]interface{}); ok {
-		parentNostrID, rootNostrID := p.resolveReplyRefs(replyBlock)
-		if parentNostrID != "" {
-			// NIP-10 positional convention: first e-tag = root, last = direct parent.
-			tags = append(tags, nostr.Tag{"e", rootNostrID}, nostr.Tag{"e", parentNostrID})
-			tags = append(tags, nostr.Tag{"p", p.LocalPubKey})
+		replyToID, rootID = p.resolveReplyRefs(replyBlock)
+		if replyToID != "" {
+			mentionPubkeys = []string{p.LocalPubKey}
 		}
 	}
 
-	// Attach image blobs as NIP-94 imeta tags and append CDN URLs to content.
-	for _, img := range extractImagesFromRecord(record, post.Author.DID) {
-		tags = append(tags, buildImeta(img))
-		content += "\n\n" + img.URL
+	// Quote post: resolve the quoted AT URI to a Nostr event ID.
+	var quoteEventID string
+	if uri := extractQuoteURI(record); uri != "" {
+		quoteEventID, _ = p.Store.GetNostrIDForObject(uri)
 	}
 
-	// Source link attribution: full URL in an r-tag (won't trigger embed),
-	// bare hostname only in the content (not a full URL → no preview card).
-	if p.ShowSourceLink {
-		sourceURL := atURIToHTTPS(post.URI)
-		if !strings.Contains(content, sourceURL) {
-			tags = append(tags, nostr.Tag{"r", sourceURL})
-			if host := hostOf(sourceURL); host != "" {
-				content += "\n\n🔗 " + host
-			}
-		}
+	np := bridge.NormalizedPost{
+		Content:        content,
+		CreatedAt:      createdAt,
+		Images:         extractImagesFromRecord(record, post.Author.DID),
+		ReplyToEventID: replyToID,
+		RootEventID:    rootID,
+		MentionPubkeys: mentionPubkeys,
+		QuoteEventID:   quoteEventID,
+		Hashtags:       extractHashtagsFromRecord(record),
+		SourceURL:      atURIToHTTPS(post.URI),
+		ShowSourceLink: p.ShowSourceLink,
+		ProxyID:        post.URI,
+		ProxyProtocol:  "atproto",
 	}
-
-	event := &nostr.Event{
-		Kind:      1,
-		Content:   content,
-		CreatedAt: createdAt,
-		Tags:      tags,
-	}
+	event := bridge.BuildKind1Event(np)
 
 	// Publish a kind-0 for the author so clients can display their profile.
 	p.publishAuthorProfile(ctx, post.Author.DID, post.Author.Handle, post.Author.DisplayName)
@@ -275,32 +272,6 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 	slog.Info("bsky poller: bridged timeline post", "author", post.Author.Handle, "uri", post.URI)
 }
 
-// hostOf extracts the hostname from a URL string (e.g. "https://bsky.app/..." → "bsky.app").
-func hostOf(rawURL string) string {
-	if i := strings.Index(rawURL, "://"); i >= 0 {
-		rest := rawURL[i+3:]
-		if j := strings.IndexByte(rest, '/'); j >= 0 {
-			return rest[:j]
-		}
-		return rest
-	}
-	return ""
-}
-
-// buildImeta constructs a NIP-94 imeta tag from a Bluesky ImageInfo.
-func buildImeta(img ImageInfo) nostr.Tag {
-	parts := []string{"imeta", "url " + img.URL}
-	if img.MimeType != "" {
-		parts = append(parts, "m "+img.MimeType)
-	}
-	if img.Width > 0 && img.Height > 0 {
-		parts = append(parts, fmt.Sprintf("dim %dx%d", img.Width, img.Height))
-	}
-	if img.Alt != "" {
-		parts = append(parts, "alt "+img.Alt)
-	}
-	return nostr.Tag(parts)
-}
 
 // resolveReplyRefs looks up Nostr event IDs for the parent and root of a
 // Bluesky reply record. Returns empty strings if either is not bridged.
@@ -432,39 +403,27 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 	record, _ := n.Record.(map[string]interface{})
 	content := extractContentFromRecord(record)
 
-	// Use 2-element e-tags (no relay hint) to satisfy strict relay schemas.
-	// Positional convention (NIP-10): first = root, last = direct parent.
-	// proxy tag prevents the outbound Bluesky bridge from re-posting this.
-	replyTags := nostr.Tags{
-		{"e", rootNostrID},
-		{"e", parentNostrID},
-		{"p", p.LocalPubKey},
-		{"proxy", n.URI, "atproto"},
-	}
-	// Attach image blobs as NIP-94 imeta tags and append CDN URLs to content.
-	for _, img := range extractImagesFromRecord(record, n.Author.DID) {
-		replyTags = append(replyTags, buildImeta(img))
-		content += "\n\n" + img.URL
+	// Quote post: resolve the quoted AT URI to a Nostr event ID.
+	var quoteEventID string
+	if uri := extractQuoteURI(record); uri != "" {
+		quoteEventID, _ = p.Store.GetNostrIDForObject(uri)
 	}
 
-	// Source link attribution: full URL in an r-tag (won't trigger embed),
-	// bare hostname only in the content (not a full URL → no preview card).
-	if p.ShowSourceLink {
-		sourceURL := atURIToHTTPS(n.URI)
-		if !strings.Contains(content, sourceURL) {
-			replyTags = append(replyTags, nostr.Tag{"r", sourceURL})
-			if host := hostOf(sourceURL); host != "" {
-				content += "\n\n🔗 " + host
-			}
-		}
+	np := bridge.NormalizedPost{
+		Content:        content,
+		CreatedAt:      nostr.Now(),
+		Images:         extractImagesFromRecord(record, n.Author.DID),
+		ReplyToEventID: parentNostrID,
+		RootEventID:    rootNostrID,
+		MentionPubkeys: []string{p.LocalPubKey},
+		QuoteEventID:   quoteEventID,
+		Hashtags:       extractHashtagsFromRecord(record),
+		SourceURL:      atURIToHTTPS(n.URI),
+		ShowSourceLink: p.ShowSourceLink,
+		ProxyID:        n.URI,
+		ProxyProtocol:  "atproto",
 	}
-
-	event := &nostr.Event{
-		Kind:      1,
-		Content:   content,
-		CreatedAt: nostr.Now(),
-		Tags:      replyTags,
-	}
+	event := bridge.BuildKind1Event(np)
 
 	// Sign with a derived key for the Bluesky author's DID, giving them a
 	// stable pseudonymous Nostr identity across all their replies.

@@ -8,6 +8,8 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/rivo/uniseg"
+
+	"github.com/klppl/klistr/internal/bridge"
 )
 
 const (
@@ -351,15 +353,6 @@ func extractNotifText(n *Notification) string {
 
 // ─── Image extraction (Bluesky → Nostr) ──────────────────────────────────────
 
-// ImageInfo holds metadata for a bridged Bluesky image attachment.
-type ImageInfo struct {
-	URL      string
-	Alt      string
-	MimeType string
-	Width    int
-	Height   int
-}
-
 // blobToCDNURL constructs a Bluesky CDN URL for a blob.
 // authorDID is the post author's DID; cid is the blob's $link value.
 func blobToCDNURL(authorDID, cid, mimeType string) string {
@@ -370,10 +363,10 @@ func blobToCDNURL(authorDID, cid, mimeType string) string {
 	return fmt.Sprintf("https://cdn.bsky.app/img/feed_fullsize/plain/%s/%s@%s", authorDID, cid, format)
 }
 
-// extractImagesFromRecord returns ImageInfo for every image in an
+// extractImagesFromRecord returns bridge.ImageInfo for every image in an
 // app.bsky.embed.images embed block. authorDID is required to construct
 // CDN blob URLs. Returns nil if the record has no image embed.
-func extractImagesFromRecord(record map[string]interface{}, authorDID string) []ImageInfo {
+func extractImagesFromRecord(record map[string]interface{}, authorDID string) []bridge.ImageInfo {
 	if record == nil || authorDID == "" {
 		return nil
 	}
@@ -389,7 +382,7 @@ func extractImagesFromRecord(record map[string]interface{}, authorDID string) []
 		return nil
 	}
 
-	var result []ImageInfo
+	var result []bridge.ImageInfo
 	for _, img := range images {
 		image, ok := img.(map[string]interface{})
 		if !ok {
@@ -420,7 +413,7 @@ func extractImagesFromRecord(record map[string]interface{}, authorDID string) []
 			}
 		}
 
-		result = append(result, ImageInfo{
+		result = append(result, bridge.ImageInfo{
 			URL:      blobToCDNURL(authorDID, cid, mimeType),
 			Alt:      alt,
 			MimeType: mimeType,
@@ -429,6 +422,73 @@ func extractImagesFromRecord(record map[string]interface{}, authorDID string) []
 		})
 	}
 	return result
+}
+
+// ─── Hashtag + quote extraction (Bluesky → Nostr) ────────────────────────────
+
+// extractHashtagsFromRecord returns hashtag tag names from Bluesky richtext
+// facets (app.bsky.richtext.facet#tag). Duplicates are suppressed.
+func extractHashtagsFromRecord(record map[string]interface{}) []string {
+	if record == nil {
+		return nil
+	}
+	facets, ok := record["facets"].([]interface{})
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var tags []string
+	for _, f := range facets {
+		facet, ok := f.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		features, ok := facet["features"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, feat := range features {
+			feature, ok := feat.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if ftype, _ := feature["$type"].(string); ftype == facetTagType {
+				tag, _ := feature["tag"].(string)
+				if tag != "" && !seen[tag] {
+					seen[tag] = true
+					tags = append(tags, tag)
+				}
+			}
+		}
+	}
+	return tags
+}
+
+// extractQuoteURI returns the AT URI of a quoted post from embed.record or
+// embed.recordWithMedia. Returns empty string if no quote embed is present.
+func extractQuoteURI(record map[string]interface{}) string {
+	if record == nil {
+		return ""
+	}
+	embed, ok := record["embed"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	switch embedType, _ := embed["$type"].(string); embedType {
+	case "app.bsky.embed.record":
+		if rec, ok := embed["record"].(map[string]interface{}); ok {
+			uri, _ := rec["uri"].(string)
+			return uri
+		}
+	case "app.bsky.embed.recordWithMedia":
+		if rec, ok := embed["record"].(map[string]interface{}); ok {
+			if inner, ok := rec["record"].(map[string]interface{}); ok {
+				uri, _ := inner["uri"].(string)
+				return uri
+			}
+		}
+	}
+	return ""
 }
 
 // RKeyFromURI extracts the rkey from an AT URI (at://did/collection/rkey).

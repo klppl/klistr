@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+
+	"github.com/klppl/klistr/internal/bridge"
 )
 
 // APHandler handles incoming ActivityPub activities and converts them to Nostr events.
@@ -378,31 +380,21 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 	// Convert AP Note content (HTML) to plain text.
 	content := htmlToText(note.Content)
 
-	event := &nostr.Event{
-		Kind:      1,
-		Content:   content,
-		CreatedAt: parseNostrTimestamp(note.Published),
-		Tags:      nostr.Tags{},
-	}
-
-	// Add p-tags for mentions.
-	// While iterating, collect mention actor URLs so we can exclude them when
-	// appending hidden href links below (we don't want profile URLs cluttering content).
+	// Extract mentions: collect pubkeys for p-tags and actor URLs for href filtering.
 	mentionHrefs := make(map[string]bool)
+	var mentionPubkeys []string
 	for _, tag := range note.Tag {
 		m, ok := tag.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		tagType, _ := m["type"].(string)
-		if tagType == "Mention" {
+		if tagType, _ := m["type"].(string); tagType == "Mention" {
 			href, _ := m["href"].(string)
 			if href != "" {
 				mentionHrefs[href] = true
 			}
-			nostrPubkey, err := h.Signer.PublicKey(href)
-			if err == nil {
-				event.Tags = append(event.Tags, nostr.Tag{"p", nostrPubkey, h.NostrRelay})
+			if nostrPubkey, err := h.Signer.PublicKey(href); err == nil {
+				mentionPubkeys = append(mentionPubkeys, nostrPubkey)
 			}
 		}
 	}
@@ -424,24 +416,27 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		}
 	}
 
-	// Add reply tag.
+	// Resolve reply threading.
+	var replyToEventID string
 	if note.InReplyTo != "" {
-		if replyNostrID, ok := h.resolveNostrID(note.InReplyTo); ok {
-			event.Tags = append(event.Tags, nostr.Tag{"e", replyNostrID, h.NostrRelay, "reply"})
+		if id, ok := h.resolveNostrID(note.InReplyTo); ok {
+			replyToEventID = id
 		}
 		// If parent is unresolvable, publish without the reply tag so the post
 		// is not silently dropped — the content is still preserved.
 	}
 
-	// Add quote tag.
+	// Resolve quote reference.
+	var quoteEventID string
 	if note.QuoteURL != "" {
-		if quoteNostrID, ok := h.resolveNostrID(note.QuoteURL); ok {
-			event.Tags = append(event.Tags, nostr.Tag{"q", quoteNostrID, h.NostrRelay})
+		if id, ok := h.resolveNostrID(note.QuoteURL); ok {
+			quoteEventID = id
 		}
-		// If unresolvable, the quoted URL is typically already present in the note content.
+		// If unresolvable, the quoted URL is typically already visible in the content.
 	}
 
-	// Add hashtags.
+	// Extract hashtags.
+	var hashtags []string
 	for _, tag := range note.Tag {
 		m, ok := tag.(map[string]interface{})
 		if !ok {
@@ -451,65 +446,61 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 			name, _ := m["name"].(string)
 			name = strings.TrimPrefix(name, "#")
 			if name != "" {
-				event.Tags = append(event.Tags, nostr.Tag{"t", name})
+				hashtags = append(hashtags, name)
 			}
 		}
 	}
 
 	// Content warning.
+	var contentWarning string
 	if note.Sensitive && note.Summary != "" {
-		event.Tags = append(event.Tags, nostr.Tag{"content-warning", note.Summary})
+		contentWarning = note.Summary
 	}
 
-	// Media attachments.
+	// Media attachments: images → ImageInfo for imeta tags; link cards → append
+	// URL to content (imeta is for actual media, not HTML link previews).
+	var images []bridge.ImageInfo
 	for _, att := range note.Attachment {
 		if att.URL == "" {
 			continue
 		}
-		// Link-card previews (type "Link", mediaType "text/html") are not
-		// media files. Append their URL to content so the article gets
-		// embedded in Nostr clients, but skip the imeta tag (imeta is for
-		// actual media — images/video/audio).
 		if att.Type == "Link" || strings.HasPrefix(att.MediaType, "text/") {
 			if !strings.Contains(content, att.URL) {
 				content += "\n\n" + att.URL
 			}
 			continue
 		}
-		imeta := []string{"imeta", "url " + att.URL}
-		if att.MediaType != "" {
-			imeta = append(imeta, "m "+att.MediaType)
-		}
-		if att.Width > 0 && att.Height > 0 {
-			imeta = append(imeta, fmt.Sprintf("dim %dx%d", att.Width, att.Height))
-		}
-		if att.Blurhash != "" {
-			imeta = append(imeta, "blurhash "+att.Blurhash)
-		}
-		event.Tags = append(event.Tags, nostr.Tag(imeta))
-		content += "\n\n" + att.URL
+		images = append(images, bridge.ImageInfo{
+			URL:      att.URL,
+			MimeType: att.MediaType,
+			Blurhash: att.Blurhash,
+			Width:    att.Width,
+			Height:   att.Height,
+		})
 	}
 
-	// Source link attribution when ShowSourceLink is enabled.
-	// Full URL goes into an r-tag so Nostr clients that support it can link back.
-	// Only the bare hostname (e.g. "mastodon.social") goes into the content — a
-	// hostname without a scheme is not treated as an embeddable URL by Nostr
-	// clients, so it won't overshadow the actual links shared in the post.
-	if h.ShowSourceLink {
-		sourceURL := note.URL
-		if sourceURL == "" {
-			sourceURL = note.ID
-		}
-		if sourceURL != "" && !strings.Contains(content, sourceURL) {
-			event.Tags = append(event.Tags, nostr.Tag{"r", sourceURL})
-			if host := extractDomain(sourceURL); host != "" {
-				content += "\n\n🔗 " + host
-			}
-		}
+	// Source URL for attribution (note.URL is the canonical web URL of the post).
+	sourceURL := note.URL
+	if sourceURL == "" {
+		sourceURL = note.ID
 	}
 
-	event.Content = content
-	event.Tags = append(event.Tags, nostr.Tag{"proxy", note.ID, "activitypub"})
+	np := bridge.NormalizedPost{
+		Content:        content,
+		CreatedAt:      parseNostrTimestamp(note.Published),
+		Images:         images,
+		ReplyToEventID: replyToEventID,
+		RelayHint:      h.NostrRelay,
+		MentionPubkeys: mentionPubkeys,
+		QuoteEventID:   quoteEventID,
+		Hashtags:       hashtags,
+		ContentWarning: contentWarning,
+		SourceURL:      sourceURL,
+		ShowSourceLink: h.ShowSourceLink,
+		ProxyID:        note.ID,
+		ProxyProtocol:  "activitypub",
+	}
+	event := bridge.BuildKind1Event(np)
 
 	if err := h.signEvent(event, note.AttributedTo); err != nil {
 		return nil, fmt.Errorf("sign event: %w", err)
@@ -587,7 +578,7 @@ func (h *APHandler) sendFollowNotification(ctx context.Context, followerActorURL
 	handle := followerActorURL
 	if actor, err := FetchActor(ctx, followerActorURL); err == nil && actor != nil {
 		if actor.PreferredUsername != "" {
-			if domain := extractDomain(followerActorURL); domain != "" {
+			if domain := bridge.ExtractHost(followerActorURL); domain != "" {
 				handle = "@" + actor.PreferredUsername + "@" + domain
 			}
 		}
@@ -606,18 +597,6 @@ func (h *APHandler) sendFollowNotification(ctx context.Context, followerActorURL
 	}
 }
 
-// extractDomain returns the host portion of a URL, or empty string on error.
-func extractDomain(rawURL string) string {
-	// Find the scheme delimiter and then the path start.
-	rest := rawURL
-	if i := strings.Index(rest, "://"); i >= 0 {
-		rest = rest[i+3:]
-	}
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		return rest[:i]
-	}
-	return rest
-}
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 

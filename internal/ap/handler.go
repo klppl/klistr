@@ -261,13 +261,25 @@ func (h *APHandler) handleLike(ctx context.Context, activity IncomingActivity) e
 		return nil
 	}
 
+	// Idempotency: skip if this Like activity was already processed (e.g. retry).
+	if _, ok := h.Store.GetNostrIDForObject(activity.ID); ok {
+		return nil
+	}
+
 	var objectID string
 	if err := json.Unmarshal(activity.Object, &objectID); err != nil {
 		return fmt.Errorf("parse like object: %w", err)
 	}
 
+	// Synchronously fetch the liked object if not yet cached so the Nostr ID
+	// lookup succeeds even when the Like arrives before the target post.
+	if _, ok := h.Store.GetNostrIDForObject(objectID); !ok {
+		h.fetchAndCacheObject(ctx, objectID)
+	}
+
 	nostrID, ok := h.Store.GetNostrIDForObject(objectID)
 	if !ok {
+		slog.Debug("like: cannot resolve Nostr ID for liked object", "object", objectID)
 		return nil
 	}
 
@@ -284,11 +296,22 @@ func (h *APHandler) handleLike(ctx context.Context, activity IncomingActivity) e
 	if err := h.signEvent(event, activity.Actor); err != nil {
 		return err
 	}
-	return h.Publisher.Publish(ctx, event)
+	if err := h.Publisher.Publish(ctx, event); err != nil {
+		return err
+	}
+	if err := h.Store.AddObject(activity.ID, event.ID); err != nil {
+		slog.Warn("like: failed to store activity mapping", "error", err)
+	}
+	return nil
 }
 
 func (h *APHandler) handleEmojiReact(ctx context.Context, activity IncomingActivity) error {
 	if !isPublic(activity) {
+		return nil
+	}
+
+	// Idempotency: skip if this EmojiReact activity was already processed.
+	if _, ok := h.Store.GetNostrIDForObject(activity.ID); ok {
 		return nil
 	}
 
@@ -297,8 +320,14 @@ func (h *APHandler) handleEmojiReact(ctx context.Context, activity IncomingActiv
 		return fmt.Errorf("parse emoji react object: %w", err)
 	}
 
+	// Synchronously fetch the target object if not yet cached, same as handleLike.
+	if _, ok := h.Store.GetNostrIDForObject(objectID); !ok {
+		h.fetchAndCacheObject(ctx, objectID)
+	}
+
 	nostrID, ok := h.Store.GetNostrIDForObject(objectID)
 	if !ok {
+		slog.Debug("emoji react: cannot resolve Nostr ID for target object", "object", objectID)
 		return nil
 	}
 
@@ -315,7 +344,13 @@ func (h *APHandler) handleEmojiReact(ctx context.Context, activity IncomingActiv
 	if err := h.signEvent(event, activity.Actor); err != nil {
 		return err
 	}
-	return h.Publisher.Publish(ctx, event)
+	if err := h.Publisher.Publish(ctx, event); err != nil {
+		return err
+	}
+	if err := h.Store.AddObject(activity.ID, event.ID); err != nil {
+		slog.Warn("emoji react: failed to store activity mapping", "error", err)
+	}
+	return nil
 }
 
 func (h *APHandler) handleDelete(ctx context.Context, activity IncomingActivity) error {
@@ -627,18 +662,43 @@ func parseNostrTimestamp(s string) nostr.Timestamp {
 }
 
 func htmlToText(h string) string {
-	// Strip HTML tags and decode entities.
+	// Scan byte-by-byte. '<' and '>' are single-byte ASCII, so byte-level
+	// indexing is safe even for multi-byte UTF-8 content between tags.
 	var result strings.Builder
-	inTag := false
-	for _, c := range h {
-		switch {
-		case c == '<':
-			inTag = true
-		case c == '>':
-			inTag = false
-		case !inTag:
-			result.WriteRune(c)
+	i := 0
+	for i < len(h) {
+		if h[i] != '<' {
+			result.WriteByte(h[i])
+			i++
+			continue
 		}
+		// Find the closing '>'.
+		end := strings.IndexByte(h[i:], '>')
+		if end == -1 {
+			// Unclosed tag — treat the rest as literal text.
+			result.WriteString(h[i:])
+			break
+		}
+		tagContent := strings.TrimSpace(h[i+1 : i+end])
+		i += end + 1
+
+		// Extract tag name: strip leading slash (closing tags), then truncate
+		// at the first space or slash (attributes / self-closing markers).
+		name := strings.TrimPrefix(tagContent, "/")
+		if idx := strings.IndexAny(name, " /"); idx != -1 {
+			name = name[:idx]
+		}
+		name = strings.ToLower(strings.TrimSpace(name))
+
+		// Emit newlines for block-level elements instead of silently dropping
+		// them, so Mastodon paragraphs and line breaks survive the conversion.
+		switch name {
+		case "p", "div", "blockquote", "li":
+			result.WriteString("\n\n")
+		case "br":
+			result.WriteString("\n")
+		}
+		// All other tags are stripped silently.
 	}
 	// Decode common HTML entities.
 	text := result.String()
@@ -648,7 +708,7 @@ func htmlToText(h string) string {
 	text = strings.ReplaceAll(text, "&quot;", `"`)
 	text = strings.ReplaceAll(text, "&#39;", "'")
 	text = strings.ReplaceAll(text, "&nbsp;", " ")
-	// Normalize multiple newlines.
+	// Normalize multiple newlines introduced by consecutive block elements.
 	for strings.Contains(text, "\n\n\n") {
 		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
 	}
@@ -656,7 +716,6 @@ func htmlToText(h string) string {
 }
 
 func buildMetadataContent(actor *Actor, localDomain string) string {
-	// Build JSON metadata from AP actor.
 	// Prefer the human-readable URL (e.g. https://mastodon.social/@alice) over
 	// the AP actor ID URL so Nostr clients can link back to the original profile.
 	profileURL := actor.URL
@@ -672,18 +731,23 @@ func buildMetadataContent(actor *Actor, localDomain string) string {
 		about += profileURL
 	}
 
-	parts := []string{
-		fmt.Sprintf(`"name":"%s"`, jsonEscape(actor.Name)),
-		fmt.Sprintf(`"about":"%s"`, jsonEscape(about)),
+	meta := struct {
+		Name    string `json:"name"`
+		About   string `json:"about"`
+		Picture string `json:"picture,omitempty"`
+		Banner  string `json:"banner,omitempty"`
+		Website string `json:"website,omitempty"`
+		NIP05   string `json:"nip05,omitempty"`
+	}{
+		Name:    actor.Name,
+		About:   about,
+		Website: profileURL,
 	}
 	if actor.Icon != nil {
-		parts = append(parts, fmt.Sprintf(`"picture":"%s"`, jsonEscape(actor.Icon.URL)))
+		meta.Picture = actor.Icon.URL
 	}
 	if actor.Image != nil {
-		parts = append(parts, fmt.Sprintf(`"banner":"%s"`, jsonEscape(actor.Image.URL)))
-	}
-	if profileURL != "" {
-		parts = append(parts, fmt.Sprintf(`"website":"%s"`, jsonEscape(profileURL)))
+		meta.Banner = actor.Image.URL
 	}
 
 	// NIP-05: build a verifiable bridge identifier so Nostr clients show
@@ -692,12 +756,15 @@ func buildMetadataContent(actor *Actor, localDomain string) string {
 		actorHost := bridge.ExtractHost(actor.ID)
 		localHost := bridge.ExtractHost(localDomain)
 		if actorHost != "" && localHost != "" {
-			nip05 := actor.PreferredUsername + "_at_" + actorHost + "@" + localHost
-			parts = append(parts, fmt.Sprintf(`"nip05":"%s"`, jsonEscape(nip05)))
+			meta.NIP05 = actor.PreferredUsername + "_at_" + actorHost + "@" + localHost
 		}
 	}
 
-	return "{" + strings.Join(parts, ",") + "}"
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return `{"name":"","about":""}`
+	}
+	return string(b)
 }
 
 func buildMetadataContentFromActor(actor *Actor, localDomain string) string {
@@ -721,11 +788,3 @@ func extractHrefsFromHTML(html string) []string {
 	return hrefs
 }
 
-func jsonEscape(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	return s
-}

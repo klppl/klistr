@@ -64,6 +64,11 @@ type Poller struct {
 	ShowSourceLink *atomic.Bool // append bsky.app post URL at the bottom of bridged notes
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
 	TriggerCh <-chan struct{}
+
+	// pollSeenDIDs tracks DIDs whose profiles have already been published in
+	// the current poll cycle. Reset at the start of each poll() call.
+	// Not goroutine-safe — only accessed from the single poll goroutine.
+	pollSeenDIDs map[string]struct{}
 }
 
 // Start begins the notification polling loop. Blocks until ctx is cancelled.
@@ -100,8 +105,12 @@ func (p *Poller) Start(ctx context.Context) {
 
 // poll runs one full polling cycle: notifications then timeline.
 func (p *Poller) poll(ctx context.Context) {
+	// Reset per-cycle profile dedup map so each DID gets at most one
+	// GetProfile API call per poll, regardless of how many posts they authored.
+	p.pollSeenDIDs = make(map[string]struct{})
 	p.pollNotifications(ctx)
 	p.pollTimeline(ctx)
+	p.pollSeenDIDs = nil // release for GC between polls
 }
 
 // pollNotifications fetches new Bluesky notifications (likes, reposts, replies,
@@ -429,9 +438,15 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 
 	parentNostrID, ok := p.Store.GetNostrIDForObject(parentURI)
 	if !ok {
-		slog.Debug("bsky poller: reply parent not bridged, falling back to DM",
-			"parentURI", parentURI, "author", n.Author.Handle)
-		return false
+		// Parent not in DB — fetch and bridge the full ancestor chain first,
+		// then retry. Mirrors the behaviour of bridgePost (timeline path).
+		p.ensureAncestorsBridged(ctx, parentURI)
+		parentNostrID, ok = p.Store.GetNostrIDForObject(parentURI)
+		if !ok {
+			slog.Debug("bsky poller: reply parent not bridged after ancestor fetch, falling back to DM",
+				"parentURI", parentURI, "author", n.Author.Handle)
+			return false
+		}
 	}
 
 	// Use root if available; fall back to parent as the root.
@@ -497,9 +512,19 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 // publishAuthorProfile publishes a Nostr kind-0 metadata event for a Bluesky
 // author using their derived pseudonymous keypair, so Nostr clients can display
 // their profile and link back to their Bluesky account.
+// Within a single poll cycle, each DID is published at most once to avoid
+// redundant GetProfile API calls that can trigger Bluesky rate limits.
 func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayName string) {
 	if did == "" || handle == "" {
 		return
+	}
+
+	// Dedup within the current poll cycle.
+	if p.pollSeenDIDs != nil {
+		if _, seen := p.pollSeenDIDs[did]; seen {
+			return
+		}
+		p.pollSeenDIDs[did] = struct{}{}
 	}
 
 	profileURL := "https://bsky.app/profile/" + handle

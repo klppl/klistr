@@ -24,7 +24,10 @@ var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
-const objectCacheTTL = time.Hour
+const (
+	objectCacheTTL          = time.Hour
+	objectCacheSweepInterval = 10 * time.Minute
+)
 
 type cacheEntry struct {
 	obj     map[string]interface{}
@@ -33,6 +36,24 @@ type cacheEntry struct {
 
 // objectCache is a TTL-bounded in-memory cache for fetched AP objects.
 var objectCache sync.Map // url → cacheEntry
+
+func init() {
+	// Background sweeper: evicts expired entries so the cache doesn't grow
+	// unbounded over long runtimes with many distinct actor URLs.
+	go func() {
+		ticker := time.NewTicker(objectCacheSweepInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			objectCache.Range(func(k, v any) bool {
+				if now.After(v.(cacheEntry).expires) {
+					objectCache.Delete(k)
+				}
+				return true
+			})
+		}
+	}()
+}
 
 // FetchObject fetches an ActivityPub object from a remote URL.
 // Returns the raw JSON or an error. Results are cached.

@@ -213,18 +213,21 @@ func (h *Handler) isEligible(event *nostr.Event) bool {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// isEmojiContent returns true if the content is an emoji or Extended_Pictographic character.
+// isEmojiContent returns true if the string contains at least one rune that
+// falls within a known Unicode emoji block. The length-based fallback was
+// intentionally removed: it false-positived on short non-emoji strings like
+// "ok", "→" (U+2192), and "↩" (U+21A9).
 func isEmojiContent(s string) bool {
 	if s == "" || s == "+" || s == "-" {
 		return false
 	}
 	for _, r := range s {
-		// Extended Pictographic range includes most emoji
-		if (r >= 0x1F000 && r <= 0x1FFFF) || // Misc symbols, emoticons, etc.
-			(r >= 0x2600 && r <= 0x27FF) || // Misc symbols
-			(r >= 0x2300 && r <= 0x23FF) { // Misc technical
+		if (r >= 0x1F000 && r <= 0x1FAFF) || // Emoji, emoticons, pictographs (main blocks)
+			(r >= 0x2600 && r <= 0x27BF) || // Misc Symbols + Dingbats
+			(r >= 0x2300 && r <= 0x23FF) || // Misc Technical (⌚⌛⏩ etc.)
+			(r >= 0x2B00 && r <= 0x2BFF) { // Misc Symbols and Arrows (⭐⬛⬜ etc.)
 			return true
 		}
 	}
-	return len([]rune(s)) <= 2 // Short strings might be emoji sequences
+	return false
 }

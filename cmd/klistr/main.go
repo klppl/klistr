@@ -303,6 +303,7 @@ func main() {
 				Store:          store,
 				LocalPubKey:    cfg.NostrPublicKey,
 				LocalActorURL:  localActorURL,
+				LocalDomain:    cfg.LocalDomain,
 				Interval:       30 * time.Second,
 				ShowSourceLink: showSourceLink,
 				TriggerCh:      bskyTrigger,

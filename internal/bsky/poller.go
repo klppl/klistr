@@ -59,6 +59,7 @@ type Poller struct {
 	Store         PollerStore
 	LocalPubKey    string
 	LocalActorURL  string // used to record inbound Bluesky followers
+	LocalDomain    string // used to build NIP-05 identifiers for bridged Bluesky authors
 	Interval       time.Duration
 	ShowSourceLink *atomic.Bool // append bsky.app post URL at the bottom of bridged notes
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
@@ -526,18 +527,35 @@ func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayN
 			"handle", handle, "error", err)
 	}
 
+	// Store handle → DID mapping so the NIP-05 endpoint can resolve it without
+	// making an outbound API call.
+	if err := p.Store.SetKV("bsky_did_"+handle, did); err != nil {
+		slog.Debug("bsky poller: failed to store handle→DID mapping", "handle", handle, "error", err)
+	}
+
+	// Build NIP-05 identifier: "<handle>@<localHost>" e.g. "alice.bsky.social@yourdomain.com"
+	var nip05 string
+	if p.LocalDomain != "" {
+		localHost := bridge.ExtractHost(p.LocalDomain)
+		if localHost != "" {
+			nip05 = handle + "@" + localHost
+		}
+	}
+
 	profileMeta := struct {
 		Name    string `json:"name"`
 		About   string `json:"about"`
 		Picture string `json:"picture,omitempty"`
 		Banner  string `json:"banner,omitempty"`
 		Website string `json:"website"`
+		NIP05   string `json:"nip05,omitempty"`
 	}{
 		Name:    name,
 		About:   about,
 		Picture: avatarURL,
 		Banner:  bannerURL,
 		Website: profileURL,
+		NIP05:   nip05,
 	}
 	metaBytes, err := json.Marshal(profileMeta)
 	if err != nil {

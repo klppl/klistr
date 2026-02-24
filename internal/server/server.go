@@ -475,7 +475,34 @@ func (s *Server) handleNIP05(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Bluesky handle lookup: "alice.bsky.social" → stored DID → derived pubkey.
+	if s.actorResolver != nil {
+		if pubkey, ok := s.resolveBskyHandle(name); ok {
+			jsonResponse(w, map[string]interface{}{
+				"names": map[string]string{name: pubkey},
+			}, http.StatusOK)
+			return
+		}
+	}
+
 	jsonResponse(w, map[string]interface{}{"names": map[string]string{}}, http.StatusOK)
+}
+
+// resolveBskyHandle looks up the DID stored for a Bluesky handle (written by
+// the Poller when it first bridges the author's profile) and returns the
+// derived Nostr pubkey.
+func (s *Server) resolveBskyHandle(handle string) (string, bool) {
+	did, ok := s.store.GetKV("bsky_did_" + handle)
+	if !ok || did == "" {
+		return "", false
+	}
+	pubkey, err := s.actorResolver.PublicKey(did)
+	if err != nil {
+		slog.Warn("NIP-05: failed to derive pubkey for bsky handle", "handle", handle, "error", err)
+		return "", false
+	}
+	slog.Info("NIP-05: resolved bsky handle", "handle", handle, "pubkey", pubkey[:8])
+	return pubkey, true
 }
 
 // resolveRemoteHandle converts a name like "alice_at_mastodon.social" into a

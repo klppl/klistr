@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,17 +22,21 @@ const (
 
 // relayCircuit is a per-relay circuit breaker.
 type relayCircuit struct {
-	mu        sync.Mutex
-	failCount int
-	openedAt  time.Time
-	open      bool
+	mu            sync.Mutex
+	failCount     int
+	openedAt      time.Time
+	open          bool
+	permanentOpen bool // true when relay requires PoW; stays open until manual reset
 }
 
 // isOpen returns true when the circuit is open (relay should be bypassed).
-// Resets to closed once cbCooldown has elapsed (half-open retry).
+// Resets to closed once cbCooldown has elapsed (half-open retry), unless permanentOpen is set.
 func (cb *relayCircuit) isOpen() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	if cb.permanentOpen {
+		return true
+	}
 	if !cb.open {
 		return false
 	}
@@ -41,6 +46,17 @@ func (cb *relayCircuit) isOpen() bool {
 		return false
 	}
 	return true
+}
+
+// openForPoW permanently opens the circuit for a relay that requires proof-of-work.
+// The circuit stays open until reset() is called (e.g. via the admin UI).
+func (cb *relayCircuit) openForPoW() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.open = true
+	cb.permanentOpen = true
+	cb.openedAt = time.Now()
+	cb.failCount = cbThreshold
 }
 
 // recordFailure increments the counter and opens the circuit at threshold.
@@ -67,11 +83,12 @@ func (cb *relayCircuit) recordSuccess() bool {
 	return was
 }
 
-// reset forcefully clears the circuit breaker state.
+// reset forcefully clears the circuit breaker state, including any permanent PoW lock.
 func (cb *relayCircuit) reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.open = false
+	cb.permanentOpen = false
 	cb.failCount = 0
 }
 
@@ -86,9 +103,9 @@ type RelayStatus struct {
 func (cb *relayCircuit) status(url string) RelayStatus {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	open := cb.open && time.Since(cb.openedAt) < cbCooldown
+	open := cb.permanentOpen || (cb.open && time.Since(cb.openedAt) < cbCooldown)
 	var remaining int
-	if open {
+	if open && !cb.permanentOpen {
 		r := cbCooldown - time.Since(cb.openedAt)
 		if r > 0 {
 			remaining = int(r.Seconds())
@@ -425,17 +442,25 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 	for result := range p.getPool().PublishMany(publishCtx, active, *event) {
 		cb := p.getCircuit(result.RelayURL)
 		if result.Error != nil {
-			justOpened := cb.recordFailure()
-			if justOpened {
-				slog.Warn("relay circuit opened; will retry in 5 minutes",
+			if isPowRequired(result.Error) {
+				// Relay requires NIP-13 proof-of-work which klistr doesn't mine.
+				// Permanently disable until the user removes it or resets the circuit.
+				cb.openForPoW()
+				slog.Warn("relay requires proof-of-work (NIP-13); disabling until manually reset — consider removing this relay",
 					"relay", result.RelayURL, "error", result.Error)
-			} else if st := cb.status(result.RelayURL); !st.CircuitOpen {
-				// Below threshold: log the individual failure.
-				slog.Warn("failed to publish event",
-					"relay", result.RelayURL, "id", event.ID, "error", result.Error,
-					"fail_count", st.FailCount)
+			} else {
+				justOpened := cb.recordFailure()
+				if justOpened {
+					slog.Warn("relay circuit opened; will retry in 5 minutes",
+						"relay", result.RelayURL, "error", result.Error)
+				} else if st := cb.status(result.RelayURL); !st.CircuitOpen {
+					// Below threshold: log the individual failure.
+					slog.Warn("failed to publish event",
+						"relay", result.RelayURL, "id", event.ID, "error", result.Error,
+						"fail_count", st.FailCount)
+				}
+				// Circuit already open (not just opened): suppress log to avoid spam.
 			}
-			// Circuit already open (not just opened): suppress log to avoid spam.
 			failed++
 		} else {
 			wasOpen := cb.recordSuccess()
@@ -451,4 +476,10 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 		return fmt.Errorf("failed to publish to all %d active relays", failed)
 	}
 	return nil
+}
+
+// isPowRequired returns true if the relay rejected the event due to a
+// proof-of-work requirement (NIP-13). The relay error message contains "pow:".
+func isPowRequired(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "pow:")
 }

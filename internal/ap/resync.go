@@ -28,11 +28,12 @@ type AccountResyncPublisher interface {
 
 // AccountResyncer periodically re-fetches all known AP actors and re-publishes
 // their kind-0 metadata events. This keeps derived Nostr profile data fresh
-// (name, bio, picture, website) without waiting for a new AP activity.
+// (name, bio, picture, website, nip05) without waiting for a new AP activity.
 type AccountResyncer struct {
-	Signer    AccountResyncSigner
-	Publisher AccountResyncPublisher
-	Store     AccountResyncStore
+	Signer      AccountResyncSigner
+	Publisher   AccountResyncPublisher
+	Store       AccountResyncStore
+	LocalDomain string // used to build the nip05 field in kind-0 metadata
 	// Interval between automatic resyncs. Defaults to 24h if zero.
 	Interval time.Duration
 	// TriggerCh, if non-nil, causes an immediate resync when sent to.
@@ -132,7 +133,7 @@ func (r *AccountResyncer) resyncOne(ctx context.Context, actorURL string) error 
 		return err
 	}
 
-	meta := buildMetadataContentFromActor(actor)
+	meta := buildMetadataContentFromActor(actor, r.LocalDomain)
 	event := &nostr.Event{
 		Kind:      0,
 		Content:   meta,

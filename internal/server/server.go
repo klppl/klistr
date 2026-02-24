@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -60,19 +61,21 @@ type Server struct {
 	followPublisher FollowPublisher
 	bskyClient      BskyClient
 	relayManager    RelayManager
+	showSourceLink  *atomic.Bool
 }
 
 // New creates a new Server.
 func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap.APHandler, actorKeyStore ActorKeyStore, actorResolver ActorResolver) *Server {
 	s := &Server{
-		cfg:           cfg,
-		store:         store,
-		keyPair:       keyPair,
-		apHandler:     apHandler,
-		actorKeyStore: actorKeyStore,
-		actorResolver: actorResolver,
-		startedAt:     time.Now(),
-		inboxSem:      make(chan struct{}, maxConcurrentActivities),
+		cfg:            cfg,
+		store:          store,
+		keyPair:        keyPair,
+		apHandler:      apHandler,
+		actorKeyStore:  actorKeyStore,
+		actorResolver:  actorResolver,
+		startedAt:      time.Now(),
+		inboxSem:       make(chan struct{}, maxConcurrentActivities),
+		showSourceLink: &atomic.Bool{},
 	}
 	s.router = s.buildRouter()
 	return s
@@ -98,6 +101,10 @@ func (s *Server) SetBskyClient(c BskyClient) { s.bskyClient = c }
 
 // SetRelayManager attaches the relay manager for the /web relay management endpoints.
 func (s *Server) SetRelayManager(rm RelayManager) { s.relayManager = rm }
+
+// SetShowSourceLink attaches the shared atomic bool controlling whether bridged
+// notes include a source link. Updated live by the admin settings API.
+func (s *Server) SetShowSourceLink(b *atomic.Bool) { s.showSourceLink = b }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -197,6 +204,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Delete("/api/relays", s.handleRemoveRelay)
 			r.Post("/api/relays/test", s.handleTestRelay)
 			r.Post("/api/relays/reset-circuit", s.handleResetRelayCircuit)
+			r.Get("/api/settings", s.handleGetSettings)
+			r.Patch("/api/settings", s.handleUpdateSettings)
 		})
 	}
 

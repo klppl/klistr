@@ -48,6 +48,9 @@ Fediverse user → POST /inbox        Bluesky notification poll (30s)
 - Your AP handle: `@<NOSTR_USERNAME>@your-domain.com`
 - Your AP actor URL: `https://your-domain.com/users/<NOSTR_USERNAME>`
 - Your Nostr events become AP objects at: `https://your-domain.com/objects/<event-id>`
+- Fediverse users you follow get a NIP-05 identifier: `username_at_domain@your-domain.com`
+
+When you follow a Fediverse user via klistr, their bridged Nostr profile includes a `nip05` field pointing back to your bridge. Nostr clients that support NIP-05 will show `doktorzjivago_at_mastodonsweden.se@your-domain.com` with a ✓ verified badge instead of a raw npub. The identifier also resolves via `GET /.well-known/nostr.json?name=username_at_domain` for any client to verify.
 
 ---
 
@@ -249,32 +252,37 @@ Set `WEB_ADMIN=<password>` to enable a dashboard at `https://your-domain.com/web
 | **Fediverse Followers** | List of everyone following you on the Fediverse, shown as `@user@domain`. |
 | **Following** | Two-column panel (Fediverse \| Bluesky) showing who you follow on each bridge, with per-row unfollow buttons and an add-handle input. Fediverse: WebFinger-resolves the handle and publishes a kind-3; ActivityPub Follow is sent automatically. Bluesky: creates the follow record on Bluesky and updates the kind-3. Bluesky panel is disabled when the bridge is not configured. |
 | **Import Fediverse Following** | Paste Fediverse handles (`user@domain.tld`, one per line). klistr resolves them via WebFinger, derives their Nostr pubkeys, fetches your current kind-3 from the relay to preserve existing follows, and publishes a merged kind-3 contact-list event. The bridge then sends ActivityPub Follow activities automatically. |
-| **Actions** | Force an immediate Bluesky notification poll; refresh stats. |
+| **Settings** | Edit display name, bio, picture URL, banner URL, external base URL, zap config, and the source-link toggle — all without restarting. Changes are saved to the database and survive container recreation. Profile changes (name/bio/picture/banner) immediately re-publish your kind-0 to relays. |
+| **Actions** | Force an immediate Bluesky notification poll; re-sync all bridged account profiles; refresh dashboard. |
 | **Log** | Last 500 log lines from the ring buffer. Click **Refresh** to update. Filter by level (All / Debug / Info / Warn / Error). |
 
 ---
 
 ## Configuration reference
 
+Variables marked **admin UI** can also be changed at runtime from the `/web` dashboard without restarting — they are saved to the database and override the env var on every subsequent start.
+
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `LOCAL_DOMAIN` | `http://localhost:8000` | **Yes** | Your public domain (HTTPS in production) |
 | `NOSTR_PRIVATE_KEY` | — | **Yes** | Your Nostr private key in hex |
 | `NOSTR_USERNAME` | first 8 chars of pubkey | No | Your handle on this bridge (e.g. `alice`) |
-| `NOSTR_DISPLAY_NAME` | value of `NOSTR_USERNAME` | No | Display name shown on the Fediverse |
-| `NOSTR_SUMMARY` | — | No | Bio / profile description |
-| `NOSTR_PICTURE` | — | No | Avatar image URL |
-| `NOSTR_BANNER` | — | No | Banner/header image URL |
-| `NOSTR_RELAY` | `wss://relay.mostr.pub` | No | Nostr relays, comma-separated. First entry is used as the relay hint in event tags. |
+| `NOSTR_DISPLAY_NAME` | value of `NOSTR_USERNAME` | No | Display name. **Admin UI** — changes re-publish kind-0 immediately. |
+| `NOSTR_SUMMARY` | — | No | Bio / profile description. **Admin UI** — changes re-publish kind-0 immediately. |
+| `NOSTR_PICTURE` | — | No | Avatar image URL. **Admin UI** — changes re-publish kind-0 immediately. |
+| `NOSTR_BANNER` | — | No | Banner/header image URL. **Admin UI** — changes re-publish kind-0 immediately. |
+| `NOSTR_RELAY` | `wss://relay.mostr.pub` | No | Nostr relays, comma-separated. **Fully managed via admin UI** — you can omit this env var entirely once you've configured relays in `/web`. |
 | `DATABASE_URL` | `klistr.db` | No | SQLite file path or `postgres://...` URL |
 | `PORT` | `8000` | No | HTTP server port |
 | `SIGN_FETCH` | `true` | No | Sign outbound HTTP requests (recommended) |
 | `LOG_LEVEL` | `info` | No | `info` or `debug` |
 | `BSKY_IDENTIFIER` | — | No | Bluesky handle or DID (enables Bluesky bridge) |
 | `BSKY_APP_PASSWORD` | — | No | Bluesky app password (Settings → App Passwords) |
-| `EXTERNAL_BASE_URL` | `https://njump.me` | No | Base URL for Nostr links (used in truncated Bluesky posts) |
+| `EXTERNAL_BASE_URL` | `https://njump.me` | No | Base URL for Nostr links (used in truncated Bluesky posts). **Admin UI.** |
+| `ZAP_PUBKEY` | — | No | Hex pubkey for Lightning zap split recipient. **Admin UI.** |
+| `ZAP_SPLIT` | `0.1` | No | Zap split percentage (0–1). **Admin UI.** |
 | `WEB_ADMIN` | — | No | Password for the web admin UI at `/web` (HTTP Basic Auth). Omit to disable entirely. |
-| `SHOW_SOURCE_LINK` | `false` | No | Append the original post URL (`🔗 https://…`) at the bottom of every bridged note. |
+| `SHOW_SOURCE_LINK` | `false` | No | Append the original post URL (`🔗`) at the bottom of bridged notes. **Admin UI** — takes effect immediately for new posts. |
 
 ---
 

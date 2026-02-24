@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -59,7 +60,7 @@ type Poller struct {
 	LocalPubKey    string
 	LocalActorURL  string // used to record inbound Bluesky followers
 	Interval       time.Duration
-	ShowSourceLink bool // append bsky.app post URL at the bottom of bridged notes
+	ShowSourceLink *atomic.Bool // append bsky.app post URL at the bottom of bridged notes
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
 	TriggerCh <-chan struct{}
 }
@@ -249,7 +250,7 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
 		SourceURL:      atURIToHTTPS(post.URI),
-		ShowSourceLink: p.ShowSourceLink,
+		ShowSourceLink: p.ShowSourceLink.Load(),
 		ProxyID:        post.URI,
 		ProxyProtocol:  "atproto",
 	}
@@ -419,7 +420,7 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
 		SourceURL:      atURIToHTTPS(n.URI),
-		ShowSourceLink: p.ShowSourceLink,
+		ShowSourceLink: p.ShowSourceLink.Load(),
 		ProxyID:        n.URI,
 		ProxyProtocol:  "atproto",
 	}

@@ -528,7 +528,53 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="action-msg" id="action-msg"></div>
 </div>
 
-<!-- Row 6: Log -->
+<!-- Row 6: Settings -->
+<div class="card-full">
+  <h2>Settings</h2>
+  <div style="display:flex;flex-direction:column;gap:16px">
+
+    <!-- Show source link -->
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;user-select:none">
+      <input type="checkbox" id="set-show-source-link" style="width:15px;height:15px;accent-color:var(--blue);cursor:pointer">
+      Append source link (🔗) at the bottom of bridged notes
+    </label>
+
+    <!-- Profile fields -->
+    <div>
+      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Profile (saves kind-0 to relays)</div>
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:8px 12px;align-items:center;max-width:560px">
+        <span style="font-size:12px;color:var(--muted);text-align:right">Display name</span>
+        <input type="text" id="set-display-name" placeholder="Alice" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:inherit">
+        <span style="font-size:12px;color:var(--muted);text-align:right">Bio</span>
+        <input type="text" id="set-summary" placeholder="My bio" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:inherit">
+        <span style="font-size:12px;color:var(--muted);text-align:right">Picture URL</span>
+        <input type="text" id="set-picture" placeholder="https://example.com/avatar.jpg" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:monospace">
+        <span style="font-size:12px;color:var(--muted);text-align:right">Banner URL</span>
+        <input type="text" id="set-banner" placeholder="https://example.com/banner.jpg" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:monospace">
+      </div>
+    </div>
+
+    <!-- Links & Zap -->
+    <div>
+      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Links &amp; Zap</div>
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:8px 12px;align-items:center;max-width:560px">
+        <span style="font-size:12px;color:var(--muted);text-align:right">External base URL</span>
+        <input type="text" id="set-external-base-url" placeholder="https://njump.me" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:monospace">
+        <span style="font-size:12px;color:var(--muted);text-align:right">Zap pubkey</span>
+        <input type="text" id="set-zap-pubkey" placeholder="hex pubkey (optional)" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:monospace">
+        <span style="font-size:12px;color:var(--muted);text-align:right">Zap split</span>
+        <input type="number" id="set-zap-split" placeholder="0.1" step="0.01" min="0" max="1" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-size:12px;font-family:inherit;width:120px">
+      </div>
+    </div>
+
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;margin-top:16px">
+    <button class="btn btn-blue" id="btn-save-settings" onclick="saveSettings()">Save Settings</button>
+    <span id="settings-msg" class="action-msg"></span>
+  </div>
+</div>
+
+<!-- Row 7: Log -->
 <div class="card-full">
   <h2>Log</h2>
   <div class="log-toolbar">
@@ -1234,10 +1280,72 @@ async function resetCircuit(url) {
   }
 }
 
+// ── Settings ─────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const r = await fetch('/web/api/settings');
+    const d = await r.json();
+    document.getElementById('set-show-source-link').checked = !!d.show_source_link;
+    document.getElementById('set-display-name').value = d.display_name || '';
+    document.getElementById('set-summary').value = d.summary || '';
+    document.getElementById('set-picture').value = d.picture || '';
+    document.getElementById('set-banner').value = d.banner || '';
+    document.getElementById('set-external-base-url').value = d.external_base_url || '';
+    document.getElementById('set-zap-pubkey').value = d.zap_pubkey || '';
+    document.getElementById('set-zap-split').value = d.zap_split != null ? d.zap_split : '';
+  } catch(e) {
+    console.warn('loadSettings failed', e);
+  }
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('btn-save-settings');
+  const msg = document.getElementById('settings-msg');
+  btn.disabled = true;
+  const origHTML = btn.innerHTML;
+  btn.textContent = 'Saving…';
+  msg.textContent = '';
+  msg.style.color = '';
+  try {
+    const zapVal = document.getElementById('set-zap-split').value;
+    const body = {
+      show_source_link: document.getElementById('set-show-source-link').checked,
+      display_name:     document.getElementById('set-display-name').value,
+      summary:          document.getElementById('set-summary').value,
+      picture:          document.getElementById('set-picture').value,
+      banner:           document.getElementById('set-banner').value,
+      external_base_url: document.getElementById('set-external-base-url').value,
+      zap_pubkey:       document.getElementById('set-zap-pubkey').value,
+      zap_split:        zapVal !== '' ? parseFloat(zapVal) : 0.1,
+    };
+    const r = await fetch('/web/api/settings', {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      msg.textContent = 'Saved.';
+      msg.style.color = 'var(--green)';
+      toast('Settings saved.');
+      setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 3000);
+    } else {
+      const text = await r.text();
+      msg.textContent = 'Error: ' + text;
+      msg.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    msg.textContent = 'Error: ' + e.message;
+    msg.style.color = 'var(--red)';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHTML;
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 // loadFollowing depends on bskyEnabled (set by loadStatus), so chain it.
 loadStatus().then(() => loadFollowing()).catch(e => console.error('loadFollowing failed', e));
-Promise.all([loadStats(), loadFollowers(), loadRelays()]).catch(e => console.error('init failed', e));
+Promise.all([loadStats(), loadFollowers(), loadRelays(), loadSettings()]).catch(e => console.error('init failed', e));
 
 setInterval(loadStats,    30000);
 setInterval(loadRelays,   15000);

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -36,7 +37,7 @@ type APHandler struct {
 	}
 	Federator      *Federator
 	NostrRelay     string
-	ShowSourceLink bool // append original post URL at the bottom of bridged notes
+	ShowSourceLink *atomic.Bool // append original post URL at the bottom of bridged notes
 }
 
 // HandleActivity processes an incoming ActivityPub activity.
@@ -224,7 +225,7 @@ func (h *APHandler) handleUpdate(ctx context.Context, activity IncomingActivity)
 	InvalidateCache(actor.ID)
 
 	// Create Nostr kind-0 metadata event.
-	meta := buildMetadataContent(actor)
+	meta := buildMetadataContent(actor, h.LocalDomain)
 	event := &nostr.Event{
 		Kind:      0,
 		Content:   meta,
@@ -496,7 +497,7 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		Hashtags:       hashtags,
 		ContentWarning: contentWarning,
 		SourceURL:      sourceURL,
-		ShowSourceLink: h.ShowSourceLink,
+		ShowSourceLink: h.ShowSourceLink.Load(),
 		ProxyID:        note.ID,
 		ProxyProtocol:  "activitypub",
 	}
@@ -528,7 +529,7 @@ func (h *APHandler) fetchAndCacheActor(ctx context.Context, actorID string) {
 	}
 
 	// Publish metadata event to Nostr using derived key for remote actors.
-	meta := buildMetadataContentFromActor(actor)
+	meta := buildMetadataContentFromActor(actor, h.LocalDomain)
 	event := &nostr.Event{
 		Kind:      0,
 		Content:   meta,
@@ -654,7 +655,7 @@ func htmlToText(h string) string {
 	return strings.TrimSpace(text)
 }
 
-func buildMetadataContent(actor *Actor) string {
+func buildMetadataContent(actor *Actor, localDomain string) string {
 	// Build JSON metadata from AP actor.
 	// Prefer the human-readable URL (e.g. https://mastodon.social/@alice) over
 	// the AP actor ID URL so Nostr clients can link back to the original profile.
@@ -684,11 +685,23 @@ func buildMetadataContent(actor *Actor) string {
 	if profileURL != "" {
 		parts = append(parts, fmt.Sprintf(`"website":"%s"`, jsonEscape(profileURL)))
 	}
+
+	// NIP-05: build a verifiable bridge identifier so Nostr clients show
+	// "username_at_domain@localdomain" with a ✓ badge instead of a raw npub.
+	if localDomain != "" && actor.PreferredUsername != "" {
+		actorHost := bridge.ExtractHost(actor.ID)
+		localHost := bridge.ExtractHost(localDomain)
+		if actorHost != "" && localHost != "" {
+			nip05 := actor.PreferredUsername + "_at_" + actorHost + "@" + localHost
+			parts = append(parts, fmt.Sprintf(`"nip05":"%s"`, jsonEscape(nip05)))
+		}
+	}
+
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-func buildMetadataContentFromActor(actor *Actor) string {
-	return buildMetadataContent(actor)
+func buildMetadataContentFromActor(actor *Actor, localDomain string) string {
+	return buildMetadataContent(actor, localDomain)
 }
 
 

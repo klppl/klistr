@@ -19,7 +19,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -185,6 +187,40 @@ func main() {
 		}
 	}
 
+	// ─── Settings KV overrides ────────────────────────────────────────────────
+	// Settings changed via /web admin UI are persisted in the KV table.
+	// On startup, load them to override env-var values.
+	if v, ok := store.GetKV("setting_show_source_link"); ok && v != "" {
+		cfg.ShowSourceLink = v == "true"
+	}
+	if v, ok := store.GetKV("setting_display_name"); ok {
+		cfg.NostrDisplayName = v
+	}
+	if v, ok := store.GetKV("setting_summary"); ok {
+		cfg.NostrSummary = v
+	}
+	if v, ok := store.GetKV("setting_picture"); ok {
+		cfg.NostrPicture = v
+	}
+	if v, ok := store.GetKV("setting_banner"); ok {
+		cfg.NostrBanner = v
+	}
+	if v, ok := store.GetKV("setting_external_base_url"); ok && v != "" {
+		cfg.ExternalBaseURL = v
+	}
+	if v, ok := store.GetKV("setting_zap_pubkey"); ok {
+		cfg.ZapPubkey = v
+	}
+	if v, ok := store.GetKV("setting_zap_split"); ok && v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.ZapSplit = f
+		}
+	}
+
+	// Shared atomic bool for ShowSourceLink — updated live by the admin settings API.
+	showSourceLink := &atomic.Bool{}
+	showSourceLink.Store(cfg.ShowSourceLink)
+
 	// ─── RSA Key Pair (auto-generated if missing) ─────────────────────────────
 	keyPair, err := ap.LoadOrGenerateKeyPair(cfg.RSAPrivateKeyPath, cfg.RSAPublicKeyPath)
 	if err != nil {
@@ -229,7 +265,7 @@ func main() {
 		Store:          store,
 		Federator:      federator,
 		NostrRelay:     cfg.PrimaryRelay(),
-		ShowSourceLink: cfg.ShowSourceLink,
+		ShowSourceLink: showSourceLink,
 	}
 
 	// ─── Nostr Handler (incoming Nostr → ActivityPub) ─────────────────────────
@@ -268,7 +304,7 @@ func main() {
 				LocalPubKey:    cfg.NostrPublicKey,
 				LocalActorURL:  localActorURL,
 				Interval:       30 * time.Second,
-				ShowSourceLink: cfg.ShowSourceLink,
+				ShowSourceLink: showSourceLink,
 				TriggerCh:      bskyTrigger,
 			}
 			go poller.Start(ctx)
@@ -279,11 +315,12 @@ func main() {
 	// ─── Account Profile Resyncer ─────────────────────────────────────────────
 	resyncTrigger := make(chan struct{}, 1)
 	resyncer := &ap.AccountResyncer{
-		Signer:    signer,
-		Publisher: publisher,
-		Store:     store,
-		Interval:  24 * time.Hour,
-		TriggerCh: resyncTrigger,
+		Signer:      signer,
+		Publisher:   publisher,
+		Store:       store,
+		LocalDomain: cfg.LocalDomain,
+		Interval:    24 * time.Hour,
+		TriggerCh:   resyncTrigger,
 	}
 	go resyncer.Start(ctx)
 
@@ -305,6 +342,7 @@ func main() {
 	srv.SetResyncTrigger(resyncTrigger)
 	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})
 	srv.SetRelayManager(&relayManagerAdapter{publisher: publisher, pool: pool, store: store})
+	srv.SetShowSourceLink(showSourceLink)
 	srv.Start(ctx) // blocks until ctx is cancelled
 
 	slog.Info("klistr bridge stopped")

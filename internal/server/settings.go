@@ -137,6 +137,19 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	s.handleGetSettings(w, r)
 }
 
+// handleRepublishKind0 re-publishes the local user's kind-0 profile metadata to all relays.
+// Useful after adding a new relay — the relay won't have your profile until it's re-published.
+//
+// POST /web/api/republish-kind0
+func (s *Server) handleRepublishKind0(w http.ResponseWriter, r *http.Request) {
+	if s.followPublisher == nil {
+		jsonResponse(w, map[string]string{"message": "Follow publisher not configured."}, http.StatusOK)
+		return
+	}
+	s.publishLocalKind0(r.Context())
+	jsonResponse(w, map[string]string{"message": "Kind-0 profile published to all relays."}, http.StatusOK)
+}
+
 // publishLocalKind0 signs and publishes a kind-0 metadata event for the local
 // user using the current profile settings in cfg.
 func (s *Server) publishLocalKind0(ctx context.Context) {

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,11 @@ type Server struct {
 	bskyClient      BskyClient
 	relayManager    RelayManager
 	showSourceLink  *atomic.Bool
+
+	// nip05Cache caches NIP-05 remote handle lookups (lowercase name → pubkey).
+	// Eliminates repeated WebFinger calls for the same handle across concurrent
+	// requests. NIP-05 names are case-insensitive so the key is lowercased.
+	nip05Cache sync.Map
 }
 
 // New creates a new Server.
@@ -206,6 +212,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/api/relays/reset-circuit", s.handleResetRelayCircuit)
 			r.Get("/api/settings", s.handleGetSettings)
 			r.Patch("/api/settings", s.handleUpdateSettings)
+			r.Post("/api/republish-kind0", s.handleRepublishKind0)
+			r.Post("/api/republish-kind3", s.handleRepublishKind3)
 		})
 	}
 
@@ -507,10 +515,19 @@ func (s *Server) resolveBskyHandle(handle string) (string, bool) {
 
 // resolveRemoteHandle converts a name like "alice_at_mastodon.social" into a
 // Fediverse handle, resolves it via WebFinger, and returns the derived Nostr pubkey.
+// Results are cached in memory (keyed on lowercase name) so repeated NIP-05
+// lookups for the same handle — including case variants — skip the network call.
 func (s *Server) resolveRemoteHandle(ctx context.Context, name string) (string, bool) {
 	handle := remoteHandleToFediverse(name)
 	if handle == "" {
 		return "", false
+	}
+
+	// NIP-05 names are case-insensitive; normalise before cache lookup so that
+	// "FruH_at_mastodonsweden.se" and "fruh_at_mastodonsweden.se" share one entry.
+	cacheKey := strings.ToLower(name)
+	if cached, ok := s.nip05Cache.Load(cacheKey); ok {
+		return cached.(string), true
 	}
 
 	actorURL, err := ap.WebFingerResolve(ctx, handle)
@@ -529,6 +546,7 @@ func (s *Server) resolveRemoteHandle(ctx context.Context, name string) (string, 
 		slog.Warn("NIP-05: failed to store actor key", "error", err)
 	}
 
+	s.nip05Cache.Store(cacheKey, pubkey)
 	slog.Info("NIP-05: resolved remote handle", "name", name, "handle", handle, "actor", actorURL, "pubkey", pubkey[:8])
 	return pubkey, true
 }

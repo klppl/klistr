@@ -288,6 +288,28 @@ func (s *Server) handleImportFollowing(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
+// handleRepublishKind3 re-publishes the user's kind-3 contact list to all relays by
+// merging the current relay state with all bridged follows from the local DB.
+// Useful after adding a new relay — the relay won't have your contact list until it's re-published.
+//
+// POST /web/api/republish-kind3
+func (s *Server) handleRepublishKind3(w http.ResponseWriter, r *http.Request) {
+	if s.followPublisher == nil {
+		jsonResponse(w, map[string]string{"message": "Follow publisher not configured."}, http.StatusOK)
+		return
+	}
+	totalFollows, fetchedExisting, err := s.mergeAndPublishKind3(r.Context(), nil, nil)
+	if err != nil {
+		jsonResponse(w, map[string]string{"message": "Publish failed: " + err.Error()}, http.StatusOK)
+		return
+	}
+	msg := fmt.Sprintf("Kind-3 published to all relays — %d follow(s).", totalFollows)
+	if !fetchedExisting {
+		msg += " ⚠ No existing kind-3 found on relay."
+	}
+	jsonResponse(w, map[string]string{"message": msg}, http.StatusOK)
+}
+
 // mergeAndPublishKind3 builds a new kind-3 contact list by:
 //  1. Fetching the user's existing kind-3 from relays (to preserve current follows).
 //  2. Including all AP- and Bluesky-bridged follows tracked in the local DB.

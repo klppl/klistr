@@ -500,12 +500,20 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <h2>Actions</h2>
   <div style="display:flex;flex-direction:column;gap:10px">
 
-    <div id="bsky-sync-row" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-      <button class="btn btn-blue" id="btn-bsky-sync" onclick="syncBsky()" style="min-width:178px">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        Sync Bluesky Now
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-surface" id="btn-republish-kind0" onclick="republishKind0()" style="min-width:178px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><line x1="12" y1="14" x2="12" y2="20"/><polyline points="9 17 12 14 15 17"/></svg>
+        Re-broadcast Profile
       </button>
-      <span style="font-size:12px;color:var(--muted)">Polls Bluesky for new notifications immediately, without waiting for the 30-second interval.</span>
+      <span style="font-size:12px;color:var(--muted)">Re-publishes your Nostr profile (kind-0) to all configured relays. Useful after adding a new relay.</span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-surface" id="btn-republish-kind3" onclick="republishKind3()" style="min-width:178px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/><line x1="17" y1="3" x2="17" y2="9"/><polyline points="14 6 17 3 20 6"/></svg>
+        Re-broadcast Following
+      </button>
+      <span style="font-size:12px;color:var(--muted)">Re-publishes your contact list (kind-3) to all configured relays. Useful after adding a new relay.</span>
     </div>
 
     <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -514,6 +522,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
         Refresh Profiles
       </button>
       <span style="font-size:12px;color:var(--muted)">Re-fetches profiles for all bridged accounts and republishes their Nostr kind-0 metadata. Also runs automatically every 24 hours.</span>
+    </div>
+
+    <div id="bsky-sync-row" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-surface" id="btn-bsky-sync" onclick="syncBsky()" style="min-width:178px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Sync Bluesky Now
+      </button>
+      <span style="font-size:12px;color:var(--muted)">Polls Bluesky for new notifications immediately. Useful for testing or when you want to check for new activity without waiting.</span>
     </div>
 
     <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -895,6 +911,42 @@ async function refreshProfiles() {
     setTimeout(loadStats, 3000);
   } catch(e) {
     msg.textContent = 'Error: '+e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  }
+}
+
+async function republishKind0() {
+  const btn = document.getElementById('btn-republish-kind0');
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.textContent = 'Publishing…';
+  try {
+    const r = await fetch('/web/api/republish-kind0', {method:'POST'});
+    const d = await r.json();
+    document.getElementById('action-msg').textContent = d.message;
+    toast(d.message);
+  } catch(e) {
+    document.getElementById('action-msg').textContent = 'Error: '+e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  }
+}
+
+async function republishKind3() {
+  const btn = document.getElementById('btn-republish-kind3');
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.textContent = 'Publishing…';
+  try {
+    const r = await fetch('/web/api/republish-kind3', {method:'POST'});
+    const d = await r.json();
+    document.getElementById('action-msg').textContent = d.message;
+    toast(d.message);
+  } catch(e) {
+    document.getElementById('action-msg').textContent = 'Error: '+e.message;
   } finally {
     btn.disabled = false;
     btn.innerHTML = orig;

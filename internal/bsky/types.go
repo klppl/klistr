@@ -163,6 +163,23 @@ type GetTimelineResponse struct {
 	Cursor string             `json:"cursor"`
 }
 
+// ─── Thread view (app.bsky.feed.getPostThread) ────────────────────────────────
+
+// ThreadViewPost is a node in the thread hierarchy returned by
+// app.bsky.feed.getPostThread. Parent links upward to ancestor posts.
+// Type is "app.bsky.feed.defs#threadViewPost" for valid posts;
+// other values (notFoundPost, blockedPost) should be ignored.
+type ThreadViewPost struct {
+	Type   string          `json:"$type"`
+	Post   TimelinePost    `json:"post"`
+	Parent *ThreadViewPost `json:"parent,omitempty"`
+}
+
+// GetPostThreadResponse is returned by app.bsky.feed.getPostThread.
+type GetPostThreadResponse struct {
+	Thread ThreadViewPost `json:"thread"`
+}
+
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
 // Profile is returned by app.bsky.actor.getProfile.

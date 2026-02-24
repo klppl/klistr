@@ -132,6 +132,21 @@ func (c *Client) FollowActor(ctx context.Context, did string) (string, error) {
 	return parts[len(parts)-1], nil
 }
 
+// GetPostThread fetches the thread view for a post, including up to 10 levels
+// of ancestor posts and no replies (depth=0). Used to bridge missing parent
+// posts when a followed account replies inside a thread.
+func (c *Client) GetPostThread(ctx context.Context, uri string) (*GetPostThreadResponse, error) {
+	params := url.Values{}
+	params.Set("uri", uri)
+	params.Set("depth", "0")
+	params.Set("parentHeight", "10")
+	var resp GetPostThreadResponse
+	if err := c.authedGet(ctx, "app.bsky.feed.getPostThread", params, &resp); err != nil {
+		return nil, fmt.Errorf("bsky getPostThread: %w", err)
+	}
+	return &resp, nil
+}
+
 // GetProfile fetches a profile via app.bsky.actor.getProfile.
 func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error) {
 	params := url.Values{}

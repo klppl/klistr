@@ -187,10 +187,8 @@ func (p *Poller) pollTimeline(ctx context.Context) {
 // bridgeTimelinePost converts a single timeline feed item into a Nostr kind-1
 // event signed with a derived key for the Bluesky author's DID.
 func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost) {
-	post := &item.Post
-
 	// Skip the bridge account's own posts — they originate from Nostr.
-	if post.Author.DID == p.Client.DID() {
+	if item.Post.Author.DID == p.Client.DID() {
 		return
 	}
 
@@ -201,6 +199,14 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		return
 	}
 
+	p.bridgePost(ctx, &item.Post)
+}
+
+// bridgePost bridges a single Bluesky post to a Nostr kind-1 event.
+// If the post is a reply and its parent is not yet in the DB, it fetches the
+// full ancestor chain and bridges any missing posts first so the thread is
+// preserved in Nostr.
+func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 	// Idempotency: skip if this AT URI is already in the DB.
 	if _, ok := p.Store.GetNostrIDForObject(post.URI); ok {
 		return
@@ -224,11 +230,21 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 		}
 	}
 
-	// Thread reply posts if the parent is already bridged.
+	// Thread reply posts. If the parent is not yet bridged, fetch and bridge
+	// the full ancestor chain first so we can attach a proper reply tag.
 	var replyToID, rootID string
 	var mentionPubkeys []string
 	if replyBlock, ok := record["reply"].(map[string]interface{}); ok {
 		replyToID, rootID = p.resolveReplyRefs(replyBlock)
+		if replyToID == "" {
+			// Parent not in DB — fetch the thread and bridge missing ancestors.
+			if parentMap, ok2 := replyBlock["parent"].(map[string]interface{}); ok2 {
+				if parentURI, _ := parentMap["uri"].(string); parentURI != "" {
+					p.ensureAncestorsBridged(ctx, parentURI)
+					replyToID, rootID = p.resolveReplyRefs(replyBlock)
+				}
+			}
+		}
 		if replyToID != "" {
 			mentionPubkeys = []string{p.LocalPubKey}
 		}
@@ -260,17 +276,45 @@ func (p *Poller) bridgeTimelinePost(ctx context.Context, item *TimelineFeedPost)
 	p.publishAuthorProfile(ctx, post.Author.DID, post.Author.Handle, post.Author.DisplayName)
 
 	if err := p.Signer.Sign(event, post.Author.DID); err != nil {
-		slog.Warn("bsky poller: timeline: sign failed", "author", post.Author.Handle, "error", err)
+		slog.Warn("bsky poller: sign failed", "author", post.Author.Handle, "error", err)
 		return
 	}
 	if err := p.Publisher.Publish(ctx, event); err != nil {
-		slog.Warn("bsky poller: timeline: publish failed", "author", post.Author.Handle, "error", err)
+		slog.Warn("bsky poller: publish failed", "author", post.Author.Handle, "error", err)
 		return
 	}
 	if err := p.Store.AddObject(post.URI, event.ID); err != nil {
-		slog.Warn("bsky poller: timeline: store mapping failed", "uri", post.URI, "error", err)
+		slog.Warn("bsky poller: store mapping failed", "uri", post.URI, "error", err)
 	}
-	slog.Info("bsky poller: bridged timeline post", "author", post.Author.Handle, "uri", post.URI)
+	slog.Info("bsky poller: bridged post", "author", post.Author.Handle, "uri", post.URI)
+}
+
+// ensureAncestorsBridged fetches the full ancestor chain for the given AT URI
+// via app.bsky.feed.getPostThread and bridges any posts that are not yet in the
+// DB, oldest-first, so each post can reference its parent's Nostr event ID.
+func (p *Poller) ensureAncestorsBridged(ctx context.Context, parentURI string) {
+	thread, err := p.Client.GetPostThread(ctx, parentURI)
+	if err != nil {
+		slog.Debug("bsky poller: could not fetch thread for ancestor bridging",
+			"uri", parentURI, "error", err)
+		return
+	}
+
+	// Collect the ancestor chain: current node first, root last.
+	const threadViewPost = "app.bsky.feed.defs#threadViewPost"
+	var chain []TimelinePost
+	for node := &thread.Thread; node != nil; node = node.Parent {
+		if node.Type == threadViewPost {
+			chain = append(chain, node.Post)
+		}
+	}
+
+	// Reverse to process oldest-first so each post can thread to its parent.
+	slices.Reverse(chain)
+
+	for i := range chain {
+		p.bridgePost(ctx, &chain[i])
+	}
 }
 
 

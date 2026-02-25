@@ -866,6 +866,13 @@ func (h *APHandler) fetchAndCacheObject(ctx context.Context, objectID string) {
 	if note == nil {
 		return
 	}
+	// Fetch the original author's actor so their NIP-05 handle is published
+	// as a kind-0 event. This matters for reposts (Announce) where the
+	// booster's metadata is fetched via HandleActivity but the boosted post's
+	// author would otherwise have no kind-0 with a verifiable handle.
+	if note.AttributedTo != "" {
+		go h.fetchAndCacheActor(context.Background(), note.AttributedTo)
+	}
 	event, err := h.noteToEvent(ctx, note)
 	if err != nil || event == nil {
 		return

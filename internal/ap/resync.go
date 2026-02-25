@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -38,6 +39,12 @@ type AccountResyncer struct {
 	Interval time.Duration
 	// TriggerCh, if non-nil, causes an immediate resync when sent to.
 	TriggerCh <-chan struct{}
+
+	// running is set to true while a resync is in progress.
+	// CompareAndSwap(false, true) at the top of resyncAll prevents a second
+	// invocation (e.g. a queued manual trigger) from running concurrently or
+	// immediately after a slow one finishes.
+	running atomic.Bool
 }
 
 // Start begins the periodic resync loop. Blocks until ctx is cancelled.
@@ -63,15 +70,39 @@ func (r *AccountResyncer) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			r.resyncAll(ctx)
+			r.drainTrigger(trigCh) // discard any triggers that stacked up
 		case <-trigCh:
 			slog.Info("account resync triggered manually")
 			r.resyncAll(ctx)
+			r.drainTrigger(trigCh) // discard redundant back-to-back triggers
+		}
+	}
+}
+
+// drainTrigger discards any items sitting in the trigger channel without
+// blocking. This prevents a backlog of trigger signals from causing repeated
+// sequential resyncs immediately after a slow one completes.
+func (r *AccountResyncer) drainTrigger(ch <-chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }
 
 // resyncAll iterates all known AP actor URLs and re-publishes their kind-0.
 func (r *AccountResyncer) resyncAll(ctx context.Context) {
+	// Guard against concurrent or back-to-back invocations (e.g. a ticker fire
+	// and a manual trigger arriving in quick succession). If a resync is already
+	// running, log and return immediately — the in-progress run covers the work.
+	if !r.running.CompareAndSwap(false, true) {
+		slog.Debug("resync: already in progress, skipping")
+		return
+	}
+	defer r.running.Store(false)
+
 	urls, err := r.Store.GetAllActorURLs()
 	if err != nil {
 		slog.Warn("resync: failed to list actor URLs", "error", err)

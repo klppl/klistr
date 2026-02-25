@@ -123,6 +123,7 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog("follow_added", "bridge="+req.Bridge+" handle="+req.Handle)
 	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 
@@ -179,6 +180,7 @@ func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog("follow_removed", "bridge="+req.Bridge+" handle="+req.Handle)
 	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 

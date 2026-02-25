@@ -5,16 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
+	"golang.org/x/crypto/hkdf"
 )
 
 // Signer provides signing for both the local Nostr user and derived keys for
 // ActivityPub actors. The local user's actual private key is used for their own
-// events; deterministic derived keys (SHA-256(localPrivKey + ":" + apID)) are
-// used for bridged AP actors.
+// events; deterministic derived keys are used for bridged AP actors, derived via
+// HKDF-SHA256(ikm=privkey_bytes, salt=nil, info="klistr-ap-actor:"+apID).
 type Signer struct {
 	localPrivKey string
 	localPubKey  string
@@ -42,7 +44,14 @@ func (s *Signer) LocalPublicKey() string {
 }
 
 // derivedPrivKey returns the deterministic private key for an AP actor ID.
-// Derivation: SHA-256(localPrivKey + ":" + apID). Result is cached.
+//
+// Derivation: HKDF-SHA256(ikm=privkey_bytes, salt=nil, info="klistr-ap-actor:"+apID)
+//
+// Using HKDF with a domain-separated info label instead of the previous naive
+// SHA-256(hex(privkey)+":"+apID) concatenation eliminates the second-preimage
+// risk where an attacker-controlled apID could be chosen to collide with
+// another valid seed string. salt=nil is safe because the IKM already carries
+// 256 bits of entropy. Result is cached.
 func (s *Signer) derivedPrivKey(apID string) string {
 	s.mu.RLock()
 	if key, ok := s.cache[apID]; ok {
@@ -51,9 +60,18 @@ func (s *Signer) derivedPrivKey(apID string) string {
 	}
 	s.mu.RUnlock()
 
-	seed := s.localPrivKey + ":" + apID
-	hash := sha256.Sum256([]byte(seed))
-	key := hex.EncodeToString(hash[:])
+	privKeyBytes, err := hex.DecodeString(s.localPrivKey)
+	if err != nil || len(privKeyBytes) != 32 {
+		// Should never happen: the private key is validated at startup.
+		panic("signer: invalid local private key")
+	}
+	r := hkdf.New(sha256.New, privKeyBytes, nil, []byte("klistr-ap-actor:"+apID))
+	var derived [32]byte
+	if _, err := io.ReadFull(r, derived[:]); err != nil {
+		// Cannot fail: hkdf.Reader is an infinite stream of key material.
+		panic("signer: hkdf read failed: " + err.Error())
+	}
+	key := hex.EncodeToString(derived[:])
 
 	s.mu.Lock()
 	s.cache[apID] = key

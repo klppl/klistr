@@ -164,6 +164,11 @@ func main() {
 		"pubkey", cfg.NostrPublicKey[:8],
 	)
 
+	// ─── Tunable constants ────────────────────────────────────────────────────
+	// Applied before any component is created so they take effect from the start.
+	ap.SetObjectCacheTTL(cfg.APCacheTTL)
+	nostrpkg.SetCircuitBreakerThreshold(cfg.RelayCBThreshold)
+
 	// ─── Database ─────────────────────────────────────────────────────────────
 	store, err := db.Open(cfg.DatabaseURL)
 	if err != nil {
@@ -257,6 +262,7 @@ func main() {
 		LocalDomain: cfg.LocalDomain,
 		KeyID:       localActorURL + "#main-key",
 		PrivateKey:  keyPair.Private,
+		Concurrency: cfg.APFederationConcurrency,
 		GetFollowers: func(actorURL string) ([]string, error) {
 			return store.GetFollowers(actorURL)
 		},
@@ -293,6 +299,7 @@ func main() {
 	var activeBskyClient *bsky.Client
 	if cfg.BskyEnabled() {
 		bskyClient := bsky.NewClient(cfg.BskyIdentifier, cfg.BskyAppPassword)
+		bskyClient.PDSURL = cfg.BskyPDSURL // override default bsky.social for third-party PDS
 		if err := bskyClient.Authenticate(ctx); err != nil {
 			slog.Warn("bsky auth failed, bridge disabled", "error", err)
 		} else {
@@ -312,8 +319,9 @@ func main() {
 				LocalPubKey:    cfg.NostrPublicKey,
 				LocalActorURL:  localActorURL,
 				LocalDomain:    cfg.LocalDomain,
-				Interval:       30 * time.Second,
+				Interval:       cfg.BskyPollInterval,
 				ShowSourceLink: showSourceLink,
+				BridgeTimeline: cfg.BskyBridgeTimeline,
 				TriggerCh:      bskyTrigger,
 			}
 			go poller.Start(ctx)
@@ -328,7 +336,7 @@ func main() {
 		Publisher:   publisher,
 		Store:       store,
 		LocalDomain: cfg.LocalDomain,
-		Interval:    24 * time.Hour,
+		Interval:    cfg.ResyncInterval,
 		TriggerCh:   resyncTrigger,
 	}
 	go resyncer.Start(ctx)

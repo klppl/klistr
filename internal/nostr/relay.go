@@ -15,10 +15,22 @@ import (
 type EventHandler func(ctx context.Context, event *nostr.Event)
 
 const (
-	cbThreshold          = 3             // consecutive failures before circuit opens
-	cbCooldown           = 5 * time.Minute
+	cbCooldown            = 5 * time.Minute
 	relayEventConcurrency = 20
 )
+
+// cbThreshold is a var (not const) so it can be overridden at startup via
+// SetCircuitBreakerThreshold for deployments that need a different sensitivity.
+var cbThreshold = 3 // consecutive failures before circuit opens
+
+// SetCircuitBreakerThreshold sets the number of consecutive publish failures
+// required before a relay's circuit breaker opens. Call once at startup,
+// before any Publisher is created, to override the default of 3.
+func SetCircuitBreakerThreshold(n int) {
+	if n > 0 {
+		cbThreshold = n
+	}
+}
 
 // relayCircuit is a per-relay circuit breaker.
 type relayCircuit struct {

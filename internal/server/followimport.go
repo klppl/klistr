@@ -120,6 +120,9 @@ func (s *Server) handleImportBskyFollowing(w http.ResponseWriter, r *http.Reques
 		slog.Info("import bsky following: published kind-3",
 			"total_follows", totalFollows,
 			"new_handles", len(handles))
+		ok := len(addPubkeys)
+		s.auditLog("bsky_following_imported",
+			fmt.Sprintf("submitted=%d ok=%d total_follows=%d", len(handles), ok, totalFollows))
 	}
 
 	type response struct {
@@ -270,6 +273,9 @@ func (s *Server) handleImportFollowing(w http.ResponseWriter, r *http.Request) {
 		slog.Info("import following: published kind-3",
 			"total_follows", totalFollows,
 			"new_handles", len(handles))
+		ok := len(addPubkeys)
+		s.auditLog("fediverse_following_imported",
+			fmt.Sprintf("submitted=%d ok=%d total_follows=%d", len(handles), ok, totalFollows))
 	}
 
 	type response struct {

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+
+	"golang.org/x/time/rate"
 )
 
 // Federator handles outbound federation of AP activities.
@@ -16,11 +18,40 @@ type Federator struct {
 	PrivateKey  *rsa.PrivateKey
 	// GetFollowers returns AP follower IDs for a local AP actor URL.
 	GetFollowers func(actorURL string) ([]string, error)
+	// Concurrency caps simultaneous outbound HTTP requests. 0 uses the package default (10).
+	Concurrency int
+	// perHostLimiter holds per-origin *rate.Limiter values (keyed by origin string).
+	perHostLimiter sync.Map
+}
+
+// concurrency returns the effective concurrency limit for this Federator.
+func (f *Federator) concurrency() int {
+	if f.Concurrency > 0 {
+		return f.Concurrency
+	}
+	return federationConcurrency
 }
 
 // federationConcurrency caps the number of concurrent outbound HTTP requests
 // used both for actor fetches (resolveInboxes) and activity delivery (Federate).
 const federationConcurrency = 10
+
+// federationHostRate / federationHostBurst control how quickly we may deliver
+// successive activities to a single remote origin.  2 req/s with a burst of 5
+// is generous enough for normal fan-outs while preventing us from hammering a
+// single server during a large follower spike.
+const (
+	federationHostRate  = rate.Limit(2) // tokens per second per remote origin
+	federationHostBurst = 5
+)
+
+// hostLimiter returns (creating if necessary) the per-origin rate limiter for
+// the given inbox URL.
+func (f *Federator) hostLimiter(inbox string) *rate.Limiter {
+	origin := extractOrigin(inbox)
+	v, _ := f.perHostLimiter.LoadOrStore(origin, rate.NewLimiter(federationHostRate, federationHostBurst))
+	return v.(*rate.Limiter)
+}
 
 // Federate distributes an activity to all relevant inboxes.
 // It resolves follower lists, fetches actor inboxes, and delivers via HTTP.
@@ -39,7 +70,7 @@ func (f *Federator) Federate(ctx context.Context, activity map[string]interface{
 
 	// Deliver to all inboxes in parallel, bounded to avoid overwhelming remote
 	// servers and exhausting local resources during large fan-outs.
-	sem := make(chan struct{}, federationConcurrency)
+	sem := make(chan struct{}, f.concurrency())
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var success, failed int
@@ -49,6 +80,14 @@ func (f *Federator) Federate(ctx context.Context, activity map[string]interface{
 		wg.Add(1)
 		go func(inbox string) {
 			defer func() { <-sem; wg.Done() }()
+			// Respect per-origin rate limit before sending.
+			if err := f.hostLimiter(inbox).Wait(ctx); err != nil {
+				slog.Debug("federation rate limit cancelled", "inbox", inbox)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
 			if err := DeliverActivity(ctx, inbox, activity, f.KeyID, f.PrivateKey); err != nil {
 				slog.Warn("federation failed", "inbox", inbox, "error", err)
 				mu.Lock()
@@ -133,7 +172,7 @@ func (f *Federator) resolveInboxes(ctx context.Context, recipients map[string]st
 		mu      sync.Mutex
 		inboxes = make(map[string]struct{})
 		seen    = make(map[string]struct{}) // origins already covered by a shared inbox
-		sem     = make(chan struct{}, federationConcurrency)
+		sem     = make(chan struct{}, f.concurrency())
 		wg      sync.WaitGroup
 	)
 

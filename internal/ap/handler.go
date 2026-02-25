@@ -12,6 +12,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"golang.org/x/net/html"
 
 	"github.com/klppl/klistr/internal/bridge"
 )
@@ -32,6 +33,7 @@ type APHandler struct {
 	}
 	Store interface {
 		AddObject(apID, nostrID string) error
+		DeleteObject(apID, nostrID string) error
 		AddFollow(followerID, followedID string) error
 		RemoveFollow(followerID, followedID string) error
 		GetNostrIDForObject(apID string) (string, bool)
@@ -474,6 +476,12 @@ func (h *APHandler) handleDelete(ctx context.Context, activity IncomingActivity)
 		return nil
 	}
 
+	// Evict the mapping before publishing so subsequent idempotency checks
+	// for the same AP ID don't find a stale cache hit.
+	if err := h.Store.DeleteObject(objectID, nostrID); err != nil {
+		slog.Warn("handleDelete: failed to remove object mapping", "apID", objectID, "error", err)
+	}
+
 	event := &nostr.Event{
 		Kind:      5,
 		Content:   "",
@@ -562,13 +570,33 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		}
 	}
 
-	// Resolve reply threading.
-	var replyToEventID string
+	// Resolve reply threading and the NIP-10 thread root.
+	var replyToEventID, rootEventID string
 	if note.InReplyTo != "" {
 		if id, ok := h.resolveNostrID(note.InReplyTo); ok {
 			replyToEventID = id
+
+			// Determine the thread root for the NIP-10 "root" marker.
+			// The parent AP object is almost always already in the cache because
+			// handleCreate pre-fetches it just before calling noteToEvent, so
+			// this is typically a zero-latency cache hit.
+			if parentObj, err := FetchObject(ctx, note.InReplyTo); err == nil {
+				parentNote := mapToNote(parentObj)
+				if parentNote != nil && parentNote.InReplyTo != "" {
+					// Parent is itself a reply; resolve its InReplyTo as our root.
+					if rootID, ok2 := h.resolveNostrID(parentNote.InReplyTo); ok2 {
+						rootEventID = rootID
+					}
+				}
+			}
+			// If root is still empty (parent is the root, or grandparent is
+			// not in our DB), set root = direct parent so BuildKind1Event
+			// emits a single "reply" e-tag instead of a bare positional tag.
+			if rootEventID == "" {
+				rootEventID = replyToEventID
+			}
 		}
-		// If parent is unresolvable, publish without the reply tag so the post
+		// If parent is unresolvable, publish without any reply tag so the post
 		// is not silently dropped — the content is still preserved.
 	}
 
@@ -684,6 +712,7 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		CreatedAt:      parseNostrTimestamp(note.Published),
 		Images:         images,
 		ReplyToEventID: replyToEventID,
+		RootEventID:    rootEventID,
 		RelayHint:      h.NostrRelay,
 		MentionPubkeys: mentionPubkeys,
 		QuoteEventID:   quoteEventID,
@@ -1143,54 +1172,48 @@ func parseNostrTimestamp(s string) nostr.Timestamp {
 	return nostr.Timestamp(t.Unix())
 }
 
+// htmlToText converts an ActivityPub HTML content field to plain text suitable
+// for a Nostr event body. It uses the standard HTML tokenizer so that all
+// entity references — named (&amp;), decimal (&#60;), and hexadecimal (&#x3C;)
+// — are decoded correctly. <script> and <style> content is discarded entirely.
 func htmlToText(h string) string {
-	// Scan byte-by-byte. '<' and '>' are single-byte ASCII, so byte-level
-	// indexing is safe even for multi-byte UTF-8 content between tags.
-	var result strings.Builder
-	i := 0
-	for i < len(h) {
-		if h[i] != '<' {
-			result.WriteByte(h[i])
-			i++
-			continue
-		}
-		// Find the closing '>'.
-		end := strings.IndexByte(h[i:], '>')
-		if end == -1 {
-			// Unclosed tag — treat the rest as literal text.
-			result.WriteString(h[i:])
+	z := html.NewTokenizer(strings.NewReader(h))
+	var sb strings.Builder
+	skipContent := false
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
 			break
 		}
-		tagContent := strings.TrimSpace(h[i+1 : i+end])
-		i += end + 1
-
-		// Extract tag name: strip leading slash (closing tags), then truncate
-		// at the first space or slash (attributes / self-closing markers).
-		name := strings.TrimPrefix(tagContent, "/")
-		if idx := strings.IndexAny(name, " /"); idx != -1 {
-			name = name[:idx]
+		switch tt {
+		case html.TextToken:
+			if !skipContent {
+				// z.Raw() returns the raw bytes of the text token;
+				// html.UnescapeString decodes every entity reference.
+				sb.WriteString(html.UnescapeString(string(z.Raw())))
+			}
+		case html.StartTagToken, html.SelfClosingTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "script", "style":
+				skipContent = true
+			case "p", "div", "blockquote", "li":
+				sb.WriteString("\n\n")
+			case "br":
+				sb.WriteString("\n")
+			}
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "script", "style":
+				skipContent = false
+			case "p", "div", "blockquote", "li":
+				sb.WriteString("\n\n")
+			}
 		}
-		name = strings.ToLower(strings.TrimSpace(name))
-
-		// Emit newlines for block-level elements instead of silently dropping
-		// them, so Mastodon paragraphs and line breaks survive the conversion.
-		switch name {
-		case "p", "div", "blockquote", "li":
-			result.WriteString("\n\n")
-		case "br":
-			result.WriteString("\n")
-		}
-		// All other tags are stripped silently.
 	}
-	// Decode common HTML entities.
-	text := result.String()
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", `"`)
-	text = strings.ReplaceAll(text, "&#39;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
-	// Normalize multiple newlines introduced by consecutive block elements.
+	text := sb.String()
+	// Collapse runs of blank lines left by adjacent block elements.
 	for strings.Contains(text, "\n\n\n") {
 		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
 	}

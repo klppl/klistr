@@ -12,6 +12,7 @@ import (
 // PosterStore is the subset of db.Store used by the Poster.
 type PosterStore interface {
 	AddObject(apID, nostrID string) error
+	DeleteObject(apID, nostrID string) error
 	GetAPIDForObject(nostrID string) (string, bool)
 	GetNostrIDForObject(apID string) (string, bool)
 }
@@ -76,6 +77,11 @@ func (p *Poster) handleKind5(ctx context.Context, event *nostr.Event) {
 		slog.Info("bsky: deleting bridged post", "nostrID", deletedID, "atURI", atURI)
 		if err := p.Client.DeleteRecord(ctx, p.Client.DID(), collection, rkey); err != nil {
 			slog.Warn("bsky: delete record failed", "atURI", atURI, "error", err)
+		}
+		// Evict the mapping so the idempotency guard (GetAPIDForObject) no
+		// longer blocks a potential re-post of the same Nostr event ID.
+		if err := p.Store.DeleteObject(atURI, deletedID); err != nil {
+			slog.Warn("bsky: failed to remove object mapping", "atURI", atURI, "error", err)
 		}
 	}
 }

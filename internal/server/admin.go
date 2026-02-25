@@ -24,6 +24,25 @@ func (s *Server) adminAuth(next http.Handler) http.Handler {
 	})
 }
 
+// csrfMiddleware validates the X-CSRF-Token header on all non-safe requests
+// (POST, PATCH, DELETE, PUT). The token is served via GET /web/api/status and
+// stored by the dashboard JS in _csrfToken, then sent with every mutating call.
+// This prevents cross-site request forgery attacks against the admin UI.
+func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			// Safe methods — no CSRF check needed.
+		default:
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(s.csrfToken)) != 1 {
+				http.Error(w, "invalid CSRF token", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +62,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		Relays         []string `json:"relays"`
 		Version        string   `json:"version"`
 		StartedAt      int64    `json:"started_at"` // unix timestamp
+		CSRFToken      string   `json:"csrf_token"`
 	}
 
 	resp := statusResponse{
@@ -54,6 +74,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		Relays:      s.cfg.NostrRelays,
 		Version:     version,
 		StartedAt:   s.startedAt.Unix(),
+		CSRFToken:   s.csrfToken,
 	}
 	if s.cfg.BskyEnabled() {
 		resp.BskyIdentifier = s.cfg.BskyIdentifier
@@ -629,6 +650,7 @@ let bskyEnabled = false;
 let startedAt = 0;
 let activeFilter = 'ALL';
 let _npub = '';
+let _csrfToken = '';
 
 const levelOrder = {DEBUG:0, INFO:1, WARN:2, ERROR:3};
 
@@ -679,6 +701,14 @@ function formatFollowerURL(url) {
 function updateUptime() {
   const el = document.getElementById('hdr-uptime');
   if (el && startedAt) el.textContent = formatUptime(startedAt);
+}
+
+// ── API fetch wrapper ────────────────────────────────────────────────────────
+// apiFetch wraps fetch() and automatically injects the X-CSRF-Token header.
+// The token is set by loadStatus() from the GET /web/api/status response.
+function apiFetch(url, opts = {}) {
+  const headers = Object.assign({'X-CSRF-Token': _csrfToken}, opts.headers || {});
+  return fetch(url, Object.assign({}, opts, {headers}));
 }
 
 // ── Log ──────────────────────────────────────────────────────────────────────
@@ -746,6 +776,7 @@ async function refreshLog() {
 async function loadStatus() {
   const r = await fetch('/web/api/status');
   const d = await r.json();
+  _csrfToken  = d.csrf_token || '';
   bskyEnabled = d.bsky_enabled;
   startedAt   = d.started_at;
   _npub       = d.npub || '';
@@ -889,7 +920,7 @@ async function syncBsky() {
   const orig = btn.innerHTML;
   btn.textContent = 'Triggering…';
   try {
-    const r = await fetch('/web/api/sync-bsky', {method:'POST'});
+    const r = await apiFetch('/web/api/sync-bsky', {method:'POST'});
     const d = await r.json();
     document.getElementById('action-msg').textContent = d.message;
     toast(d.message);
@@ -910,7 +941,7 @@ async function refreshProfiles() {
   btn.textContent = 'Refreshing…';
   msg.textContent = '';
   try {
-    const r = await fetch('/web/api/resync-follows', {method:'POST'});
+    const r = await apiFetch('/web/api/resync-follows', {method:'POST'});
     const d = await r.json();
     msg.textContent = d.message;
     toast(d.message);
@@ -929,7 +960,7 @@ async function republishKind0() {
   const orig = btn.innerHTML;
   btn.textContent = 'Publishing…';
   try {
-    const r = await fetch('/web/api/republish-kind0', {method:'POST'});
+    const r = await apiFetch('/web/api/republish-kind0', {method:'POST'});
     const d = await r.json();
     document.getElementById('action-msg').textContent = d.message;
     toast(d.message);
@@ -947,7 +978,7 @@ async function republishKind3() {
   const orig = btn.innerHTML;
   btn.textContent = 'Publishing…';
   try {
-    const r = await fetch('/web/api/republish-kind3', {method:'POST'});
+    const r = await apiFetch('/web/api/republish-kind3', {method:'POST'});
     const d = await r.json();
     document.getElementById('action-msg').textContent = d.message;
     toast(d.message);
@@ -1021,7 +1052,7 @@ async function addFollow(bridge) {
   const msgEl = document.getElementById(msgId);
   msgEl.textContent = 'Following…';
   try {
-    const r = await fetch('/web/api/follow', {
+    const r = await apiFetch('/web/api/follow', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({handle, bridge}),
@@ -1044,7 +1075,7 @@ async function removeFollow(handle, bridge) {
   if (!confirm('Unfollow ' + handle + '?')) return;
 
   try {
-    const r = await fetch('/web/api/unfollow', {
+    const r = await apiFetch('/web/api/unfollow', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({handle, bridge}),
@@ -1076,7 +1107,7 @@ async function importFollowing() {
   status.textContent = 'Fetching existing follows from relay, this may take up to 8s…';
 
   try {
-    const r = await fetch('/web/api/import-following', {
+    const r = await apiFetch('/web/api/import-following', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({handles}),
@@ -1144,7 +1175,7 @@ async function importBskyFollowing() {
   status.textContent = 'Resolving handles and following on Bluesky…';
 
   try {
-    const r = await fetch('/web/api/import-bsky-following', {
+    const r = await apiFetch('/web/api/import-bsky-following', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({handles}),
@@ -1247,7 +1278,7 @@ async function pingRelay(url, btn) {
   const orig = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
-    const r = await fetch('/web/api/relays/test', {
+    const r = await apiFetch('/web/api/relays/test', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({url})
@@ -1289,7 +1320,7 @@ async function addRelay() {
   if (!url) return;
   msg.textContent = 'Adding…';
   try {
-    const r = await fetch('/web/api/relays', {
+    const r = await apiFetch('/web/api/relays', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({url})
@@ -1311,7 +1342,7 @@ async function addRelay() {
 async function removeRelay(url) {
   if (!confirm('Remove relay '+url+'?')) return;
   try {
-    const r = await fetch('/web/api/relays', {
+    const r = await apiFetch('/web/api/relays', {
       method: 'DELETE',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({url})
@@ -1326,7 +1357,7 @@ async function removeRelay(url) {
 
 async function resetCircuit(url) {
   try {
-    await fetch('/web/api/relays/reset-circuit', {
+    await apiFetch('/web/api/relays/reset-circuit', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({url})
@@ -1378,7 +1409,7 @@ async function saveSettings() {
       zap_pubkey:       document.getElementById('set-zap-pubkey').value,
       zap_split:        zapVal !== '' ? parseFloat(zapVal) : 0.1,
     };
-    const r = await fetch('/web/api/settings', {
+    const r = await apiFetch('/web/api/settings', {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),

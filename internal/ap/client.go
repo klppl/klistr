@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,14 +22,29 @@ import (
 // This typically means the actor or object has been deleted.
 var ErrGone = errors.New("resource gone (410)")
 
+// ErrActorGone is returned by VerifySignature when the signing actor's key
+// URL responds with HTTP 410. The caller is responsible for deciding whether
+// the activity type permits accepting an unsigned request (only "Delete" does).
+var ErrActorGone = errors.New("signing actor is gone (410)")
+
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
-const (
-	objectCacheTTL          = time.Hour
+// objectCacheTTL is a var (not const) so it can be overridden at startup via
+// SetObjectCacheTTL for deployments that want a longer or shorter cache window.
+var (
+	objectCacheTTL           = time.Hour
 	objectCacheSweepInterval = 10 * time.Minute
 )
+
+// SetObjectCacheTTL overrides the TTL used for both the AP object cache and
+// the WebFinger handle cache. Call once at startup, before any concurrent use.
+func SetObjectCacheTTL(d time.Duration) {
+	if d > 0 {
+		objectCacheTTL = d
+	}
+}
 
 type cacheEntry struct {
 	obj     map[string]interface{}
@@ -37,9 +54,20 @@ type cacheEntry struct {
 // objectCache is a TTL-bounded in-memory cache for fetched AP objects.
 var objectCache sync.Map // url → cacheEntry
 
+// wfCache caches WebFinger handle → AP actor URL resolutions.
+// Key is the lowercased handle ("alice@mastodon.social"); value is wfCacheEntry.
+// Prevents redundant outbound WebFinger requests during batch follow imports and
+// repeated NIP-05 lookups for the same remote actor.
+type wfCacheEntry struct {
+	actorURL string
+	expires  time.Time
+}
+
+var wfCache sync.Map // lowercased handle → wfCacheEntry
+
 func init() {
-	// Background sweeper: evicts expired entries so the cache doesn't grow
-	// unbounded over long runtimes with many distinct actor URLs.
+	// Background sweeper: evicts expired entries from both caches so they don't
+	// grow unbounded over long runtimes with many distinct URLs / handles.
 	go func() {
 		ticker := time.NewTicker(objectCacheSweepInterval)
 		defer ticker.Stop()
@@ -48,6 +76,12 @@ func init() {
 			objectCache.Range(func(k, v any) bool {
 				if now.After(v.(cacheEntry).expires) {
 					objectCache.Delete(k)
+				}
+				return true
+			})
+			wfCache.Range(func(k, v any) bool {
+				if now.After(v.(wfCacheEntry).expires) {
+					wfCache.Delete(k)
 				}
 				return true
 			})
@@ -111,13 +145,24 @@ func InvalidateCache(rawURL string) {
 }
 
 // WebFingerResolve resolves a Fediverse handle (e.g. "alice@mastodon.social")
-// to an AP actor URL via WebFinger. Returns the actor URL or an error.
+// to an AP actor URL via WebFinger. Results are cached for objectCacheTTL (1h)
+// to avoid redundant outbound requests during batch follow imports.
 func WebFingerResolve(ctx context.Context, handle string) (string, error) {
 	parts := strings.SplitN(handle, "@", 2)
 	if len(parts) != 2 {
 		return "", fmt.Errorf("invalid handle %q: expected user@domain", handle)
 	}
 	domain := parts[1]
+
+	// Check cache. Handles are lowercased so "Alice@X" and "alice@X" share one entry.
+	cacheKey := strings.ToLower(handle)
+	if cached, ok := wfCache.Load(cacheKey); ok {
+		entry := cached.(wfCacheEntry)
+		if time.Now().Before(entry.expires) {
+			return entry.actorURL, nil
+		}
+		wfCache.Delete(cacheKey)
+	}
 
 	wfURL := "https://" + domain + "/.well-known/webfinger?resource=acct:" + handle
 
@@ -150,8 +195,8 @@ func WebFingerResolve(ctx context.Context, handle string) (string, error) {
 	}
 
 	for _, link := range wf.Links {
-		if link.Rel == "self" && (link.Type == "application/activity+json" ||
-			link.Type == `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`) {
+		if link.Rel == "self" && isAPMediaType(link.Type) {
+			wfCache.Store(cacheKey, wfCacheEntry{actorURL: link.Href, expires: time.Now().Add(objectCacheTTL)})
 			return link.Href, nil
 		}
 	}
@@ -203,9 +248,58 @@ func DeliverActivity(ctx context.Context, inbox string, activity map[string]inte
 	return nil
 }
 
+// maxDateSkew is the maximum allowed difference between the request's Date
+// header and the server's current time. Mastodon enforces the same window.
+// Requests outside this window are rejected to prevent signature replay attacks.
+const maxDateSkew = 30 * time.Second
+
+// VerifyDigest checks that the Digest request header matches the SHA-256 hash
+// of the given body. This ensures the request body was not tampered with in
+// transit after the HTTP signature was computed.
+//
+// Returns nil when:
+//   - the Digest header is absent (digest is optional; many older AP servers omit it), or
+//   - the header is present and the SHA-256 hash matches.
+//
+// Returns an error when the header is present but the hash does not match.
+// Unknown digest algorithms (anything other than SHA-256) are skipped rather
+// than rejected for forward-compatibility.
+func VerifyDigest(body []byte, digestHeader string) error {
+	if digestHeader == "" {
+		return nil
+	}
+	const prefix = "SHA-256="
+	if !strings.HasPrefix(digestHeader, prefix) {
+		// Unknown algorithm — skip, don't block, for forward-compatibility.
+		return nil
+	}
+	sum := sha256.Sum256(body)
+	got := base64.StdEncoding.EncodeToString(sum[:])
+	want := digestHeader[len(prefix):]
+	if got != want {
+		return fmt.Errorf("digest mismatch: body SHA-256=%s, header claims SHA-256=%s", got, want)
+	}
+	return nil
+}
+
 // VerifySignature verifies an incoming HTTP signature.
 // Returns the keyID if valid, or an error.
 func VerifySignature(req *http.Request) (string, error) {
+	// Reject replayed requests by checking the Date header age before doing
+	// any cryptographic work. A captured signed request (Date + signature
+	// intact) cannot be reused after the ±30-second window.
+	dateStr := req.Header.Get("Date")
+	if dateStr == "" {
+		return "", fmt.Errorf("missing Date header")
+	}
+	reqTime, err := http.ParseTime(dateStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid Date header %q: %w", dateStr, err)
+	}
+	if skew := time.Since(reqTime); skew > maxDateSkew || skew < -maxDateSkew {
+		return "", fmt.Errorf("Date header too skewed (%v, allowed ±%v)", skew.Round(time.Second), maxDateSkew)
+	}
+
 	verifier, err := httpsig.NewVerifier(req)
 	if err != nil {
 		return "", fmt.Errorf("create verifier: %w", err)
@@ -218,10 +312,11 @@ func VerifySignature(req *http.Request) (string, error) {
 	actor, err := FetchActor(req.Context(), actorURL)
 	if err != nil {
 		if errors.Is(err, ErrGone) {
-			// Actor has been deleted; signature cannot be verified but we
-			// accept the activity (typically a Delete from a now-gone account).
-			slog.Debug("actor gone, skipping signature verification", "keyId", keyID)
-			return keyID, nil
+			// Actor has been deleted; we cannot verify the signature.
+			// Return ErrActorGone so the caller can decide whether the
+			// activity type (only "Delete") permits accepting it unsigned.
+			slog.Debug("actor gone, deferring accept decision to caller", "keyId", keyID)
+			return keyID, ErrActorGone
 		}
 		return "", fmt.Errorf("fetch actor for key %s: %w", keyID, err)
 	}
@@ -435,4 +530,20 @@ func getString(m map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+// isAPMediaType reports whether a WebFinger link content-type string represents
+// an ActivityPub actor document. MIME types are case-insensitive per RFC 2045,
+// and some servers add extra whitespace around the profile parameter — both are
+// handled by normalising to lowercase and using prefix / substring matching.
+func isAPMediaType(ct string) bool {
+	lower := strings.ToLower(ct)
+	// application/activity+json is the modern, compact media type.
+	if lower == "application/activity+json" {
+		return true
+	}
+	// application/ld+json; profile="https://www.w3.org/ns/activitystreams"
+	// Accept any casing or whitespace around the semicolon and equals sign.
+	return strings.HasPrefix(lower, "application/ld+json") &&
+		strings.Contains(lower, "https://www.w3.org/ns/activitystreams")
 }

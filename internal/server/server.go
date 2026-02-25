@@ -5,7 +5,10 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +22,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/time/rate"
+
 	"github.com/klppl/klistr/internal/ap"
 	"github.com/klppl/klistr/internal/config"
 	"github.com/klppl/klistr/internal/db"
@@ -49,7 +54,70 @@ const (
 	// maxPerOriginConcurrency is the per-origin (AP actor hostname) concurrency cap.
 	// Prevents a single noisy origin from consuming the entire global semaphore.
 	maxPerOriginConcurrency = 5
+
+	// inboxRateLimit is the steady-state inbox request rate allowed per remote IP.
+	// 5 req/s is generous for any legitimate AP server; a flood attacker burns
+	// through the burst allowance and then hits this ceiling.
+	inboxRateLimit = rate.Limit(5)
+
+	// inboxRateBurst is the token-bucket burst capacity per remote IP.
+	// Allows a short burst (e.g. Mastodon delivering a backlog) without 429s.
+	inboxRateBurst = 20
+
+	// ipLimiterTTL is how long an idle IP's token bucket is retained before eviction.
+	ipLimiterTTL = 5 * time.Minute
 )
+
+// ipRateLimiter maintains a per-remote-IP token bucket to bound the inbox
+// request rate before any expensive work (signature verification) is done.
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*ipEntry
+}
+
+type ipEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+func newIPRateLimiter() *ipRateLimiter {
+	l := &ipRateLimiter{entries: make(map[string]*ipEntry)}
+	// Background goroutine evicts stale entries so the map doesn't grow
+	// unboundedly over long uptimes with many distinct source IPs.
+	go func() {
+		ticker := time.NewTicker(ipLimiterTTL)
+		defer ticker.Stop()
+		for range ticker.C {
+			l.evictStale()
+		}
+	}()
+	return l
+}
+
+// allow returns true and consumes a token if the remote IP is within its rate
+// limit. Returns false immediately (no blocking) when the bucket is empty.
+func (l *ipRateLimiter) allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[ip]
+	if !ok {
+		e = &ipEntry{limiter: rate.NewLimiter(inboxRateLimit, inboxRateBurst)}
+		l.entries[ip] = e
+	}
+	e.lastSeen = time.Now()
+	return e.limiter.Allow()
+}
+
+func (l *ipRateLimiter) evictStale() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := time.Now().Add(-ipLimiterTTL)
+	for ip, e := range l.entries {
+		if e.lastSeen.Before(cutoff) {
+			delete(l.entries, ip)
+		}
+	}
+}
 
 // inboxLimiter is a per-origin concurrent-activity counter.
 // It tracks how many inbox activities from each origin hostname are currently
@@ -97,9 +165,10 @@ type Server struct {
 	router        *chi.Mux
 	actorKeyStore ActorKeyStore
 	actorResolver ActorResolver
-	startedAt      time.Time
-	inboxSem       chan struct{}  // global concurrency cap for inbox processing
-	inboxLimiter   *inboxLimiter // per-origin concurrency cap
+	startedAt        time.Time
+	inboxSem         chan struct{}    // global concurrency cap for inbox processing
+	inboxLimiter     *inboxLimiter   // per-origin concurrency cap
+	inboxIPLimiter   *ipRateLimiter  // per-remote-IP token-bucket rate limiter
 
 	// Optional — set before Start() is called.
 	logBroadcaster  *LogBroadcaster
@@ -115,10 +184,19 @@ type Server struct {
 	// Eliminates repeated WebFinger calls for the same handle across concurrent
 	// requests. NIP-05 names are case-insensitive so the key is lowercased.
 	nip05Cache sync.Map
+
+	// csrfToken is a random 32-hex-character token generated at startup.
+	// The admin UI reads it from GET /web/api/status and sends it back in the
+	// X-CSRF-Token header on all mutating requests. csrfMiddleware validates it.
+	csrfToken string
 }
 
 // New creates a new Server.
 func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap.APHandler, actorKeyStore ActorKeyStore, actorResolver ActorResolver) *Server {
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	s := &Server{
 		cfg:            cfg,
 		store:          store,
@@ -127,10 +205,12 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 		actorKeyStore:  actorKeyStore,
 		actorResolver:  actorResolver,
 		startedAt:      time.Now(),
-		inboxSem:       make(chan struct{}, maxConcurrentActivities),
-		inboxLimiter:   newInboxLimiter(),
+		inboxSem:         make(chan struct{}, maxConcurrentActivities),
+		inboxLimiter:     newInboxLimiter(),
+		inboxIPLimiter:   newIPRateLimiter(),
 		showSourceLink:    &atomic.Bool{},
 		autoAcceptFollows: func() *atomic.Bool { b := &atomic.Bool{}; b.Store(true); return b }(),
+		csrfToken:      hex.EncodeToString(tokenBytes),
 	}
 	s.router = s.buildRouter()
 	return s
@@ -242,6 +322,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	if s.cfg.WebAdminPassword != "" {
 		r.Route("/web", func(r chi.Router) {
 			r.Use(s.adminAuth)
+			r.Use(s.csrfMiddleware)
 			r.Get("/", s.handleAdminDashboard)
 			r.Get("/api/log", s.handleAdminLogSnapshot)
 			r.Get("/api/status", s.handleAdminStatus)
@@ -264,6 +345,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Patch("/api/settings", s.handleUpdateSettings)
 			r.Post("/api/republish-kind0", s.handleRepublishKind0)
 			r.Post("/api/republish-kind3", s.handleRepublishKind3)
+			r.Get("/api/audit-log", s.handleGetAuditLog)
 		})
 	}
 
@@ -455,19 +537,67 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	// Verify HTTP signature.
-	if s.cfg.SignFetch {
-		if _, err := ap.VerifySignature(r); err != nil {
-			slog.Warn("invalid HTTP signature", "error", err, "remote", r.RemoteAddr)
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
+	// Rate-limit by remote IP before doing any expensive work. Signature
+	// verification requires an outbound HTTP call to fetch the actor's public
+	// key; allowing unlimited requests would let an attacker exhaust the actor
+	// cache and saturate outbound connections with zero cost on their side.
+	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if remoteIP == "" {
+		remoteIP = r.RemoteAddr
+	}
+	if !s.inboxIPLimiter.allow(remoteIP) {
+		slog.Warn("inbox IP rate limit exceeded", "remote", r.RemoteAddr)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
 	}
 
+	// Read the body first so we can verify the Digest header before (and
+	// independently of) the HTTP signature check.
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
+	}
+
+	// Verify HTTP signature and Digest header.
+	// actorGone is set when the signing actor returned HTTP 410. We defer the
+	// accept/reject decision until after we know the activity type: only
+	// "Delete" activities may be accepted without a verifiable signature.
+	var actorGone bool
+	if s.cfg.SignFetch {
+		// Verify Digest header: confirms body was not modified in transit after signing.
+		if err := ap.VerifyDigest(body, r.Header.Get("Digest")); err != nil {
+			slog.Warn("inbox digest mismatch", "error", err, "remote", r.RemoteAddr)
+			http.Error(w, "digest mismatch", http.StatusUnauthorized)
+			return
+		}
+		_, err := ap.VerifySignature(r)
+		if err != nil {
+			if errors.Is(err, ap.ErrActorGone) {
+				actorGone = true
+			} else {
+				slog.Warn("invalid HTTP signature", "error", err, "remote", r.RemoteAddr)
+				http.Error(w, "invalid signature", http.StatusUnauthorized)
+				return
+			}
+		}
+	}
+
+	// Now that we have the body, enforce the Gone-actor restriction: only
+	// Delete activities may proceed without a verified signature.
+	if actorGone {
+		var peek struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(body, &peek)
+		if peek.Type != "Delete" {
+			slog.Warn("rejecting non-Delete activity from gone actor",
+				"type", peek.Type, "remote", r.RemoteAddr)
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+		slog.Debug("accepting Delete from gone actor", "remote", r.RemoteAddr)
 	}
 
 	// Derive the origin hostname for per-actor rate limiting.
@@ -749,6 +879,32 @@ func actorOrigin(body []byte, remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+// ─── Audit log ────────────────────────────────────────────────────────────────
+
+// auditLog records an admin mutation in the persistent audit log.
+// Failures are logged at Warn level but never propagated — audit logging is
+// best-effort and must never block or fail a user-visible operation.
+func (s *Server) auditLog(action, detail string) {
+	if err := s.store.WriteAuditLog(action, detail); err != nil {
+		slog.Warn("audit log write failed", "action", action, "error", err)
+	}
+}
+
+// handleGetAuditLog returns the 200 most recent admin audit log entries.
+//
+// GET /web/api/audit-log
+func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.store.GetAuditLog(200)
+	if err != nil {
+		http.Error(w, "failed to read audit log", http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []db.AuditLogEntry{}
+	}
+	jsonResponse(w, entries, http.StatusOK)
 }
 
 // ─── Utility functions ────────────────────────────────────────────────────────

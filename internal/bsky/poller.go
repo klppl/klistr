@@ -62,6 +62,11 @@ type Poller struct {
 	LocalDomain    string // used to build NIP-05 identifiers for bridged Bluesky authors
 	Interval       time.Duration
 	ShowSourceLink *atomic.Bool // append bsky.app post URL at the bottom of bridged notes
+	// BridgeTimeline, when true, enables bridging posts from followed accounts'
+	// home timeline to Nostr kind-1 events. Off by default — only notifications
+	// (likes, reposts, replies, mentions, new followers) are bridged unless this
+	// is explicitly set. Controlled by BSKY_BRIDGE_TIMELINE=true env var.
+	BridgeTimeline bool
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
 	TriggerCh <-chan struct{}
 
@@ -103,13 +108,15 @@ func (p *Poller) Start(ctx context.Context) {
 	}
 }
 
-// poll runs one full polling cycle: notifications then timeline.
+// poll runs one full polling cycle: notifications, then (optionally) timeline.
 func (p *Poller) poll(ctx context.Context) {
 	// Reset per-cycle profile dedup map so each DID gets at most one
 	// GetProfile API call per poll, regardless of how many posts they authored.
 	p.pollSeenDIDs = make(map[string]struct{})
 	p.pollNotifications(ctx)
-	p.pollTimeline(ctx)
+	if p.BridgeTimeline {
+		p.pollTimeline(ctx)
+	}
 	p.pollSeenDIDs = nil // release for GC between polls
 }
 

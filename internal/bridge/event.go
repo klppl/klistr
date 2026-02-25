@@ -72,25 +72,20 @@ func BuildKind1Event(post NormalizedPost) *nostr.Event {
 		tags = append(tags, nostr.Tag{"proxy", post.ProxyID, post.ProxyProtocol})
 	}
 
-	// Thread e-tags (NIP-10 positional convention).
+	// Thread e-tags (NIP-10 marker convention: preferred over deprecated positional style).
+	// relay hint may be empty string; markers are always set.
 	if post.ReplyToEventID != "" {
+		relay := post.RelayHint
 		root := post.RootEventID
 		if root == "" || root == post.ReplyToEventID {
-			// Single parent: one positional e-tag.
-			if post.RelayHint != "" {
-				tags = append(tags, nostr.Tag{"e", post.ReplyToEventID, post.RelayHint})
-			} else {
-				tags = append(tags, nostr.Tag{"e", post.ReplyToEventID})
-			}
+			// Direct reply to root: single e-tag with "reply" marker.
+			// Clients that don't understand markers fall back to positional
+			// (single e-tag = treat as both root and reply), which is fine.
+			tags = append(tags, nostr.Tag{"e", post.ReplyToEventID, relay, "reply"})
 		} else {
-			// Multi-level thread: root first, direct parent last.
-			if post.RelayHint != "" {
-				tags = append(tags, nostr.Tag{"e", root, post.RelayHint})
-				tags = append(tags, nostr.Tag{"e", post.ReplyToEventID, post.RelayHint})
-			} else {
-				tags = append(tags, nostr.Tag{"e", root})
-				tags = append(tags, nostr.Tag{"e", post.ReplyToEventID})
-			}
+			// Multi-level thread: root marker first, reply marker last.
+			tags = append(tags, nostr.Tag{"e", root, relay, "root"})
+			tags = append(tags, nostr.Tag{"e", post.ReplyToEventID, relay, "reply"})
 		}
 	}
 

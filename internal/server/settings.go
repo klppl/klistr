@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 )
@@ -71,6 +72,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	profileChanged := false
+	var changed []string // accumulate changed fields for the audit log
 
 	if req.ShowSourceLink != nil {
 		s.showSourceLink.Store(*req.ShowSourceLink)
@@ -79,6 +81,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist show_source_link", "error", err)
 		}
 		slog.Info("settings: show_source_link updated", "value", *req.ShowSourceLink)
+		changed = append(changed, "show_source_link="+strconv.FormatBool(*req.ShowSourceLink))
 	}
 
 	if req.AutoAcceptFollows != nil {
@@ -87,6 +90,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist auto_accept_follows", "error", err)
 		}
 		slog.Info("settings: auto_accept_follows updated", "value", *req.AutoAcceptFollows)
+		changed = append(changed, "auto_accept_follows="+strconv.FormatBool(*req.AutoAcceptFollows))
 	}
 
 	if req.DisplayName != nil {
@@ -95,6 +99,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist display_name", "error", err)
 		}
 		profileChanged = true
+		changed = append(changed, "display_name="+*req.DisplayName)
 	}
 
 	if req.Summary != nil {
@@ -103,6 +108,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist summary", "error", err)
 		}
 		profileChanged = true
+		changed = append(changed, "summary=<updated>")
 	}
 
 	if req.Picture != nil {
@@ -111,6 +117,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist picture", "error", err)
 		}
 		profileChanged = true
+		changed = append(changed, "picture=<updated>")
 	}
 
 	if req.Banner != nil {
@@ -119,6 +126,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist banner", "error", err)
 		}
 		profileChanged = true
+		changed = append(changed, "banner=<updated>")
 	}
 
 	if req.ExternalBaseURL != nil {
@@ -126,6 +134,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.SetKV(kvExternalBaseURL, *req.ExternalBaseURL); err != nil {
 			slog.Warn("settings: failed to persist external_base_url", "error", err)
 		}
+		changed = append(changed, "external_base_url="+*req.ExternalBaseURL)
 	}
 
 	if req.ZapPubkey != nil {
@@ -133,6 +142,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.SetKV(kvZapPubkey, *req.ZapPubkey); err != nil {
 			slog.Warn("settings: failed to persist zap_pubkey", "error", err)
 		}
+		changed = append(changed, "zap_pubkey=<updated>")
 	}
 
 	if req.ZapSplit != nil {
@@ -140,10 +150,15 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.SetKV(kvZapSplit, strconv.FormatFloat(*req.ZapSplit, 'f', -1, 64)); err != nil {
 			slog.Warn("settings: failed to persist zap_split", "error", err)
 		}
+		changed = append(changed, "zap_split="+strconv.FormatFloat(*req.ZapSplit, 'f', -1, 64))
 	}
 
 	if profileChanged && s.followPublisher != nil {
 		s.publishLocalKind0(r.Context())
+	}
+
+	if len(changed) > 0 {
+		s.auditLog("settings_changed", strings.Join(changed, " "))
 	}
 
 	s.handleGetSettings(w, r)

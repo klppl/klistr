@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,51 @@ type Client struct {
 	Identifier  string
 	AppPassword string
 
-	mu      sync.Mutex
-	session *Session
-	http    *http.Client
+	mu                 sync.Mutex
+	session            *Session
+	http               *http.Client
+	rateLimitRemaining int
+	rateLimitReset     time.Time
+
+	// reauth serialises re-authentication attempts so that concurrent goroutines
+	// (e.g. poller + poster) that both receive a 401 don't each independently call
+	// createSession — which would cause each new session to immediately invalidate
+	// the previous one (thundering herd on the token endpoint).
+	reauth sync.Mutex
+}
+
+// rateLimitWarnThreshold is the RateLimit-Remaining value below which we emit
+// a warning so operators notice before requests start failing.
+const rateLimitWarnThreshold = 10
+
+// rateLimitRetryMax caps how long we'll sleep after a 429 before retrying.
+const rateLimitRetryMax = 5 * time.Minute
+
+// errRateLimited is returned by doRequest when the PDS responds with HTTP 429.
+type errRateLimited struct {
+	RetryAfter time.Duration
+}
+
+func (e *errRateLimited) Error() string {
+	return fmt.Sprintf("rate limited by Bluesky PDS; retry after %s", e.RetryAfter.Round(time.Second))
+}
+
+// parseRetryAfter derives how long to wait from the 429 response headers.
+// It checks Retry-After (seconds integer) first, then RateLimit-Reset (unix ts).
+func parseRetryAfter(resp *http.Response) time.Duration {
+	if s := resp.Header.Get("Retry-After"); s != "" {
+		if secs, err := strconv.Atoi(s); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	if s := resp.Header.Get("RateLimit-Reset"); s != "" {
+		if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
+			if d := time.Until(time.Unix(ts, 0)); d > 0 {
+				return d
+			}
+		}
+	}
+	return 30 * time.Second // sane default when headers are absent
 }
 
 // NewClient creates a new Bluesky XRPC client.
@@ -57,6 +100,37 @@ func (c *Client) Authenticate(ctx context.Context) error {
 	c.mu.Unlock()
 	slog.Info("bsky authenticated", "did", session.DID, "handle", session.Handle)
 	return nil
+}
+
+// singleAuthenticate refreshes the session exactly once per expired token.
+//
+// staleToken is the AccessJwt that was in use when the 401 was received.
+// If another goroutine already refreshed the session by the time this goroutine
+// acquires the reauth mutex (current JWT ≠ staleToken), we skip the API call
+// and return nil — the caller will retry with the already-fresh token.
+//
+// This prevents the thundering-herd pattern where N goroutines each call
+// createSession concurrently, each new session invalidating the last one.
+func (c *Client) singleAuthenticate(ctx context.Context, staleToken string) error {
+	c.reauth.Lock()
+	defer c.reauth.Unlock()
+
+	// Check whether another goroutine has already refreshed the token while we
+	// were waiting for the mutex.
+	c.mu.Lock()
+	var current string
+	if c.session != nil {
+		current = c.session.AccessJwt
+	}
+	c.mu.Unlock()
+
+	if staleToken != "" && current != staleToken {
+		// Token was already refreshed — nothing to do.
+		return nil
+	}
+
+	slog.Warn("bsky token expired, re-authenticating")
+	return c.Authenticate(ctx)
 }
 
 // CreateRecord creates a record via com.atproto.repo.createRecord.
@@ -169,26 +243,62 @@ func isAuthError(err error) bool {
 	return errors.Is(err, errAuthExpired)
 }
 
-// authedPost performs an authenticated XRPC POST, re-authenticating on auth errors.
+// authedPost performs an authenticated XRPC POST, re-authenticating on auth
+// errors and backing off on rate-limit responses.
 func (c *Client) authedPost(ctx context.Context, method string, body, out interface{}) error {
+	// Capture the token in use before the request so singleAuthenticate can
+	// detect whether another goroutine has already refreshed it.
+	staleToken := c.currentToken()
+
 	err := c.xrpcPostWithAuth(ctx, method, body, out)
 	if isAuthError(err) {
-		slog.Warn("bsky token expired, re-authenticating")
-		if authErr := c.Authenticate(ctx); authErr != nil {
+		if authErr := c.singleAuthenticate(ctx, staleToken); authErr != nil {
 			return fmt.Errorf("re-authenticate: %w", authErr)
+		}
+		err = c.xrpcPostWithAuth(ctx, method, body, out)
+	}
+	var rl *errRateLimited
+	if errors.As(err, &rl) {
+		wait := rl.RetryAfter
+		if wait > rateLimitRetryMax {
+			wait = rateLimitRetryMax
+		}
+		slog.Warn("bsky rate limited on POST, backing off", "method", method, "retry_after", wait.Round(time.Second))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
 		}
 		err = c.xrpcPostWithAuth(ctx, method, body, out)
 	}
 	return err
 }
 
-// authedGet performs an authenticated XRPC GET, re-authenticating on auth errors.
+// authedGet performs an authenticated XRPC GET, re-authenticating on auth
+// errors and backing off on rate-limit responses.
 func (c *Client) authedGet(ctx context.Context, method string, params url.Values, out interface{}) error {
+	// Capture the token in use before the request so singleAuthenticate can
+	// detect whether another goroutine has already refreshed it.
+	staleToken := c.currentToken()
+
 	err := c.xrpcGetWithAuth(ctx, method, params, out)
 	if isAuthError(err) {
-		slog.Warn("bsky token expired, re-authenticating")
-		if authErr := c.Authenticate(ctx); authErr != nil {
+		if authErr := c.singleAuthenticate(ctx, staleToken); authErr != nil {
 			return fmt.Errorf("re-authenticate: %w", authErr)
+		}
+		err = c.xrpcGetWithAuth(ctx, method, params, out)
+	}
+	var rl *errRateLimited
+	if errors.As(err, &rl) {
+		wait := rl.RetryAfter
+		if wait > rateLimitRetryMax {
+			wait = rateLimitRetryMax
+		}
+		slog.Warn("bsky rate limited on GET, backing off", "method", method, "retry_after", wait.Round(time.Second))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
 		}
 		err = c.xrpcGetWithAuth(ctx, method, params, out)
 	}
@@ -247,6 +357,35 @@ func (c *Client) doPost(ctx context.Context, method string, body interface{}, ou
 	return c.doRequest(req, out)
 }
 
+// updateRateLimit records the RateLimit-Remaining / RateLimit-Reset headers
+// from any successful response and warns when headroom is critically low.
+func (c *Client) updateRateLimit(resp *http.Response) {
+	s := resp.Header.Get("RateLimit-Remaining")
+	if s == "" {
+		return
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return
+	}
+	var reset time.Time
+	if rs := resp.Header.Get("RateLimit-Reset"); rs != "" {
+		if ts, err := strconv.ParseInt(rs, 10, 64); err == nil {
+			reset = time.Unix(ts, 0)
+		}
+	}
+	c.mu.Lock()
+	c.rateLimitRemaining = n
+	c.rateLimitReset = reset
+	c.mu.Unlock()
+	if n <= rateLimitWarnThreshold {
+		slog.Warn("bsky rate limit headroom low",
+			"remaining", n,
+			"reset_in", time.Until(reset).Round(time.Second),
+		)
+	}
+}
+
 func (c *Client) doRequest(req *http.Request, out interface{}) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -259,11 +398,17 @@ func (c *Client) doRequest(req *http.Request, out interface{}) error {
 		return fmt.Errorf("read response body: %w", err)
 	}
 
+	// Track rate-limit headroom on every response (header absent on error codes too).
+	c.updateRateLimit(resp)
+
 	if resp.StatusCode == 401 {
 		return errAuthExpired
 	}
 	if resp.StatusCode == 400 && strings.Contains(string(respBody), "ExpiredToken") {
 		return errAuthExpired
+	}
+	if resp.StatusCode == 429 {
+		return &errRateLimited{RetryAfter: parseRetryAfter(resp)}
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
@@ -285,6 +430,19 @@ func (c *Client) authHeader() string {
 		return ""
 	}
 	return "Bearer " + c.session.AccessJwt
+}
+
+// currentToken returns the raw AccessJwt from the current session, or empty
+// string if not authenticated. Used by authedGet/authedPost to capture the
+// stale token before a request so singleAuthenticate can skip a redundant
+// createSession call when another goroutine has already refreshed the token.
+func (c *Client) currentToken() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == nil {
+		return ""
+	}
+	return c.session.AccessJwt
 }
 
 // DID returns the authenticated user's DID, or empty string if not authenticated.

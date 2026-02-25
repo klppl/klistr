@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
@@ -41,14 +42,36 @@ func Open(databaseURL string) (*Store, error) {
 	}
 
 	if driver == "sqlite" {
-		// SQLite performs best with WAL mode and a single writer.
-		db.SetMaxOpenConns(1)
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			return nil, fmt.Errorf("enable WAL: %w", err)
+		// WAL mode allows multiple concurrent readers alongside one writer.
+		// We allow a small connection pool so read-heavy operations (cache
+		// misses, stats, follower queries) can proceed in parallel instead of
+		// all queuing behind every write.  SQLite serialises writers itself;
+		// busy_timeout makes that serialisation graceful (retry for up to 5s)
+		// rather than immediately returning SQLITE_BUSY to the caller.
+		//
+		// For deployments receiving >~50 concurrent inbox activities, switch to
+		// PostgreSQL (already supported via DATABASE_URL=postgres://...) —
+		// SQLite's single-writer architecture is a hard ceiling that no tuning
+		// can fully remove.
+		const sqliteMaxConns = 4
+		db.SetMaxOpenConns(sqliteMaxConns)
+		db.SetMaxIdleConns(sqliteMaxConns)
+
+		for _, pragma := range []string{
+			"PRAGMA journal_mode=WAL",
+			"PRAGMA busy_timeout=5000", // ms; retries writes instead of SQLITE_BUSY
+			"PRAGMA foreign_keys=ON",
+			"PRAGMA synchronous=NORMAL", // safe with WAL; faster than FULL
+		} {
+			if _, err := db.Exec(pragma); err != nil {
+				return nil, fmt.Errorf("sqlite pragma (%s): %w", pragma, err)
+			}
 		}
-		if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-			return nil, fmt.Errorf("enable foreign_keys: %w", err)
-		}
+
+		slog.Info("sqlite database opened",
+			"max_conns", sqliteMaxConns,
+			"note", "switch to PostgreSQL for high-traffic deployments",
+		)
 	}
 
 	return &Store{db: db, driver: driver}, nil
@@ -92,6 +115,14 @@ var commonMigrations = []string{
 	// follower/following queries. Prefix scans are efficient once the column is indexed.
 	`CREATE INDEX IF NOT EXISTS objects_ap_id ON objects(ap_id)`,
 	`CREATE INDEX IF NOT EXISTS follows_follower_type ON follows(followed_id, follower_id)`,
+	// Append-only admin audit log.  ts is an RFC3339Nano timestamp; ISO 8601
+	// lexicographic ordering lets both SQLite and PostgreSQL sort by ts DESC.
+	`CREATE TABLE IF NOT EXISTS audit_log (
+		ts     TEXT NOT NULL,
+		action TEXT NOT NULL,
+		detail TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log(ts)`,
 }
 
 func (s *Store) migrateSQLite() error {
@@ -153,6 +184,24 @@ func (s *Store) GetNostrIDForObject(apID string) (string, bool) {
 	s.objectsByNostr.Store(nostrID, apID)
 	s.objectsByAP.Store(apID, nostrID)
 	return nostrID, true
+}
+
+// DeleteObject removes an ActivityPub ↔ Nostr object ID mapping from the
+// database and evicts both cache entries. Called when a Delete activity or a
+// kind-5 deletion event is processed so that stale mappings cannot cause ghost
+// re-deliveries or false-positive idempotency hits.
+func (s *Store) DeleteObject(apID, nostrID string) error {
+	var q string
+	if s.driver == "sqlite" {
+		q = `DELETE FROM objects WHERE ap_id = ? AND nostr_id = ?`
+	} else {
+		q = `DELETE FROM objects WHERE ap_id = $1 AND nostr_id = $2`
+	}
+	_, err := s.db.Exec(q, apID, nostrID)
+	// Evict from both caches regardless of whether a DB row was found.
+	s.objectsByAP.Delete(apID)
+	s.objectsByNostr.Delete(nostrID)
+	return err
 }
 
 // AddObject stores an ActivityPub ↔ Nostr object ID mapping.
@@ -335,6 +384,53 @@ func (s *Store) GetKV(key string) (string, bool) {
 		return "", false
 	}
 	return value, true
+}
+
+// ─── Audit log ────────────────────────────────────────────────────────────────
+
+// AuditLogEntry is one record in the admin audit log.
+type AuditLogEntry struct {
+	Timestamp string `json:"ts"`
+	Action    string `json:"action"`
+	Detail    string `json:"detail"`
+}
+
+// WriteAuditLog appends a new entry to the audit log. It is a best-effort
+// call — the caller should log but not propagate any error.
+func (s *Store) WriteAuditLog(action, detail string) error {
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	var q string
+	if s.driver == "sqlite" {
+		q = `INSERT INTO audit_log (ts, action, detail) VALUES (?, ?, ?)`
+	} else {
+		q = `INSERT INTO audit_log (ts, action, detail) VALUES ($1, $2, $3)`
+	}
+	_, err := s.db.Exec(q, ts, action, detail)
+	return err
+}
+
+// GetAuditLog returns up to limit entries from the audit log, newest first.
+func (s *Store) GetAuditLog(limit int) ([]AuditLogEntry, error) {
+	var q string
+	if s.driver == "sqlite" {
+		q = `SELECT ts, action, detail FROM audit_log ORDER BY ts DESC LIMIT ?`
+	} else {
+		q = `SELECT ts, action, detail FROM audit_log ORDER BY ts DESC LIMIT $1`
+	}
+	rows, err := s.db.Query(q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []AuditLogEntry
+	for rows.Next() {
+		var e AuditLogEntry
+		if err := rows.Scan(&e.Timestamp, &e.Action, &e.Detail); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }
 
 // ─── Stats ────────────────────────────────────────────────────────────────────

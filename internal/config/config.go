@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
@@ -33,8 +34,17 @@ type Config struct {
 	Port              string
 	BskyIdentifier    string // BSKY_IDENTIFIER env var (handle or DID)
 	BskyAppPassword   string // BSKY_APP_PASSWORD env var
+	BskyPDSURL        string // BSKY_PDS_URL env var — PDS endpoint (default: https://bsky.social); set for third-party PDS / did:web accounts
+	BskyBridgeTimeline bool  // BSKY_BRIDGE_TIMELINE env var — bridge followed accounts' timeline posts to Nostr (default: false)
 	WebAdminPassword  string // WEB_ADMIN env var — enables /web admin UI when set
 	ShowSourceLink    bool   // SHOW_SOURCE_LINK env var — append original post URL to bridged notes
+
+	// Tunable performance constants (all have sensible defaults; rarely need changing).
+	ResyncInterval          time.Duration // RESYNC_INTERVAL — how often AP actor profiles are re-fetched (default 24h)
+	APCacheTTL              time.Duration // AP_CACHE_TTL — TTL for the AP object / WebFinger caches (default 1h)
+	BskyPollInterval        time.Duration // BSKY_POLL_INTERVAL — how often the Bluesky notification poller runs (default 30s)
+	APFederationConcurrency int           // AP_FEDERATION_CONCURRENCY — max concurrent outbound AP HTTP requests (default 10)
+	RelayCBThreshold        int           // RELAY_CB_THRESHOLD — consecutive publish failures before circuit opens (default 3)
 }
 
 // BskyEnabled returns true if Bluesky bridge credentials are configured.
@@ -105,10 +115,18 @@ func Load() *Config {
 		ZapPubkey:         os.Getenv("ZAP_PUBKEY"),
 		ZapSplit:          parseFloat(os.Getenv("ZAP_SPLIT"), 0.1),
 		Port:              getEnv("PORT", "8000"),
-		BskyIdentifier:    os.Getenv("BSKY_IDENTIFIER"),
-		BskyAppPassword:   os.Getenv("BSKY_APP_PASSWORD"),
-		WebAdminPassword:  os.Getenv("WEB_ADMIN"),
+		BskyIdentifier:     os.Getenv("BSKY_IDENTIFIER"),
+		BskyAppPassword:    os.Getenv("BSKY_APP_PASSWORD"),
+		BskyPDSURL:         getEnv("BSKY_PDS_URL", "https://bsky.social"),
+		BskyBridgeTimeline: getEnvBool("BSKY_BRIDGE_TIMELINE"),
+		WebAdminPassword:   os.Getenv("WEB_ADMIN"),
 		ShowSourceLink:    getEnvBool("SHOW_SOURCE_LINK"),
+
+		ResyncInterval:          parseDuration(os.Getenv("RESYNC_INTERVAL"), 24*time.Hour),
+		APCacheTTL:              parseDuration(os.Getenv("AP_CACHE_TTL"), time.Hour),
+		BskyPollInterval:        parseDuration(os.Getenv("BSKY_POLL_INTERVAL"), 30*time.Second),
+		APFederationConcurrency: parseInt(os.Getenv("AP_FEDERATION_CONCURRENCY"), 10),
+		RelayCBThreshold:        parseInt(os.Getenv("RELAY_CB_THRESHOLD"), 3),
 	}
 }
 
@@ -160,4 +178,26 @@ func parseFloat(s string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+func parseDuration(s string, fallback time.Duration) time.Duration {
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return d
+}
+
+func parseInt(s string, fallback int) int {
+	if s == "" {
+		return fallback
+	}
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		return fallback
+	}
+	return i
 }

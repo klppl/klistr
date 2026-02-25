@@ -67,6 +67,7 @@ func (s *Server) handleAddRelay(w http.ResponseWriter, r *http.Request) {
 	added := s.relayManager.AddRelay(url)
 	if added {
 		slog.Info("relay added via admin", "relay", url)
+		s.auditLog("relay_added", url)
 	}
 	jsonResponse(w, map[string]interface{}{
 		"added":   added,
@@ -91,6 +92,7 @@ func (s *Server) handleRemoveRelay(w http.ResponseWriter, r *http.Request) {
 	removed := s.relayManager.RemoveRelay(url)
 	if removed {
 		slog.Info("relay removed via admin", "relay", url)
+		s.auditLog("relay_removed", url)
 	}
 	jsonResponse(w, map[string]interface{}{
 		"removed": removed,
@@ -143,6 +145,8 @@ func (s *Server) handleResetRelayCircuit(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: url required", http.StatusBadRequest)
 		return
 	}
-	s.relayManager.ResetCircuit(strings.TrimSpace(req.URL))
-	jsonResponse(w, map[string]interface{}{"ok": true, "url": req.URL}, http.StatusOK)
+	url := strings.TrimSpace(req.URL)
+	s.relayManager.ResetCircuit(url)
+	s.auditLog("relay_circuit_reset", url)
+	jsonResponse(w, map[string]interface{}{"ok": true, "url": url}, http.StatusOK)
 }

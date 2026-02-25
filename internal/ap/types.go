@@ -25,10 +25,10 @@ func (s *StringOrArray) UnmarshalJSON(data []byte) error {
 }
 
 const (
-	PublicURI          = "https://www.w3.org/ns/activitystreams#Public"
-	ActivityStreamsNS   = "https://www.w3.org/ns/activitystreams"
-	SecurityNS         = "https://w3id.org/security/v1"
-	NostrProtocolURI   = "https://github.com/nostr-protocol/nostr"
+	PublicURI         = "https://www.w3.org/ns/activitystreams#Public"
+	ActivityStreamsNS = "https://www.w3.org/ns/activitystreams"
+	SecurityNS        = "https://w3id.org/security/v1"
+	NostrProtocolURI  = "https://github.com/nostr-protocol/nostr"
 )
 
 // Context is the standard JSON-LD @context for ActivityPub objects.
@@ -36,42 +36,42 @@ var DefaultContext = []interface{}{
 	ActivityStreamsNS,
 	SecurityNS,
 	map[string]interface{}{
-		"Hashtag":     "as:Hashtag",
-		"sensitive":   "as:sensitive",
-		"schema":      "http://schema.org#",
+		"Hashtag":       "as:Hashtag",
+		"sensitive":     "as:sensitive",
+		"schema":        "http://schema.org#",
 		"PropertyValue": "schema:PropertyValue",
-		"value":       "schema:value",
-		"EmojiReact":  "http://joinmastodon.org/ns#EmojiReact",
-		"Emoji":       "http://joinmastodon.org/ns#Emoji",
-		"Zap":         "https://mostr.pub/ns#Zap",
-		"proxyOf":     "https://mostr.pub/ns#proxyOf",
-		"proxied":     "https://mostr.pub/ns#proxied",
-		"protocol":    "https://mostr.pub/ns#protocol",
+		"value":         "schema:value",
+		"EmojiReact":    "http://joinmastodon.org/ns#EmojiReact",
+		"Emoji":         "http://joinmastodon.org/ns#Emoji",
+		"Zap":           "https://mostr.pub/ns#Zap",
+		"proxyOf":       "https://mostr.pub/ns#proxyOf",
+		"proxied":       "https://mostr.pub/ns#proxied",
+		"protocol":      "https://mostr.pub/ns#protocol",
 		"authoritative": "https://mostr.pub/ns#authoritative",
-		"quoteUrl":    "as:quoteUrl",
+		"quoteUrl":      "as:quoteUrl",
 	},
 }
 
 // Actor represents an ActivityPub actor (Person, Service, etc.).
 type Actor struct {
-	Context          interface{} `json:"@context,omitempty"`
-	ID               string      `json:"id"`
-	Type             string      `json:"type"`
-	Name             string      `json:"name,omitempty"`
-	PreferredUsername string     `json:"preferredUsername"`
-	Summary          string      `json:"summary,omitempty"`
-	Inbox            string      `json:"inbox"`
-	Outbox           string      `json:"outbox,omitempty"`
-	Followers        string      `json:"followers,omitempty"`
-	Following        string      `json:"following,omitempty"`
-	PublicKey        *PublicKey  `json:"publicKey,omitempty"`
-	Icon             *Image      `json:"icon,omitempty"`
-	Image            *Image      `json:"image,omitempty"`
-	Attachment       []PropertyValue `json:"attachment,omitempty"`
-	Tag              []interface{}   `json:"tag,omitempty"`
-	URL              string      `json:"url,omitempty"`
-	Endpoints        *Endpoints  `json:"endpoints,omitempty"`
-	ProxyOf          []Proxy     `json:"proxyOf,omitempty"`
+	Context           interface{}     `json:"@context,omitempty"`
+	ID                string          `json:"id"`
+	Type              string          `json:"type"`
+	Name              string          `json:"name,omitempty"`
+	PreferredUsername string          `json:"preferredUsername"`
+	Summary           string          `json:"summary,omitempty"`
+	Inbox             string          `json:"inbox"`
+	Outbox            string          `json:"outbox,omitempty"`
+	Followers         string          `json:"followers,omitempty"`
+	Following         string          `json:"following,omitempty"`
+	PublicKey         *PublicKey      `json:"publicKey,omitempty"`
+	Icon              *Image          `json:"icon,omitempty"`
+	Image             *Image          `json:"image,omitempty"`
+	Attachment        []PropertyValue `json:"attachment,omitempty"`
+	Tag               []interface{}   `json:"tag,omitempty"`
+	URL               string          `json:"url,omitempty"`
+	Endpoints         *Endpoints      `json:"endpoints,omitempty"`
+	ProxyOf           []Proxy         `json:"proxyOf,omitempty"`
 }
 
 // PublicKey represents an RSA public key attached to an actor.
@@ -101,24 +101,24 @@ type PropertyValue struct {
 
 // Note represents an ActivityPub Note (and related types: Article, Question).
 type Note struct {
-	Context      interface{}      `json:"@context,omitempty"`
-	ID           string           `json:"id"`
-	Type         string           `json:"type"`
-	AttributedTo string           `json:"attributedTo"`
-	Name         string           `json:"name,omitempty"` // Article title or Question text
-	Content      string           `json:"content"`
-	Published    string           `json:"published,omitempty"`
-	To           []string         `json:"to,omitempty"`
-	CC           []string         `json:"cc,omitempty"`
-	Tag          []interface{}    `json:"tag,omitempty"`
-	Attachment   []Attachment     `json:"attachment,omitempty"`
-	URL          string           `json:"url,omitempty"`
-	InReplyTo    string           `json:"inReplyTo,omitempty"`
-	QuoteURL     string           `json:"quoteUrl,omitempty"`
-	Sensitive    bool             `json:"sensitive,omitempty"`
-	Summary      string           `json:"summary,omitempty"`
-	Generator    *Generator       `json:"generator,omitempty"`
-	ProxyOf      []Proxy          `json:"proxyOf,omitempty"`
+	Context      interface{}   `json:"@context,omitempty"`
+	ID           string        `json:"id"`
+	Type         string        `json:"type"`
+	AttributedTo string        `json:"attributedTo"`
+	Name         string        `json:"name,omitempty"` // Article title or Question text
+	Content      string        `json:"content"`
+	Published    string        `json:"published,omitempty"`
+	To           []string      `json:"to,omitempty"`
+	CC           []string      `json:"cc,omitempty"`
+	Tag          []interface{} `json:"tag,omitempty"`
+	Attachment   []Attachment  `json:"attachment,omitempty"`
+	URL          string        `json:"url,omitempty"`
+	InReplyTo    string        `json:"inReplyTo,omitempty"`
+	QuoteURL     string        `json:"quoteUrl,omitempty"`
+	Sensitive    bool          `json:"sensitive,omitempty"`
+	Summary      string        `json:"summary,omitempty"`
+	Generator    *Generator    `json:"generator,omitempty"`
+	ProxyOf      []Proxy       `json:"proxyOf,omitempty"`
 	// Poll fields (type=Question only).
 	OneOf       []QuestionOption `json:"oneOf,omitempty"`
 	AnyOf       []QuestionOption `json:"anyOf,omitempty"`
@@ -145,6 +145,7 @@ type Attachment struct {
 	Type      string `json:"type"`
 	URL       string `json:"url"`
 	MediaType string `json:"mediaType,omitempty"`
+	Name      string `json:"name,omitempty"` // alt text / description (AP "name" field)
 	Blurhash  string `json:"blurhash,omitempty"`
 	Width     int    `json:"width,omitempty"`
 	Height    int    `json:"height,omitempty"`
@@ -180,9 +181,9 @@ type Generator struct {
 
 // Proxy links an AP object back to its Nostr origin.
 type Proxy struct {
-	Protocol    string `json:"protocol"`
-	Proxied     string `json:"proxied"`
-	Authoritative bool `json:"authoritative,omitempty"`
+	Protocol      string `json:"protocol"`
+	Proxied       string `json:"proxied"`
+	Authoritative bool   `json:"authoritative,omitempty"`
 }
 
 // Activity is a generic ActivityPub activity.
@@ -238,11 +239,11 @@ type WebFingerLink struct {
 
 // NodeInfo structures.
 type NodeInfo struct {
-	Version           string          `json:"version"`
+	Version           string           `json:"version"`
 	Software          NodeInfoSoftware `json:"software"`
-	Protocols         []string        `json:"protocols"`
-	Usage             NodeInfoUsage   `json:"usage"`
-	OpenRegistrations bool            `json:"openRegistrations"`
+	Protocols         []string         `json:"protocols"`
+	Usage             NodeInfoUsage    `json:"usage"`
+	OpenRegistrations bool             `json:"openRegistrations"`
 }
 
 type NodeInfoSoftware struct {

@@ -13,12 +13,13 @@ import (
 // ImageInfo holds normalised media attachment metadata for NIP-94 imeta tags.
 // Used by both the ActivityPub and Bluesky bridge parsers.
 type ImageInfo struct {
-	URL      string
-	Alt      string
-	MimeType string
-	Blurhash string
-	Width    int
-	Height   int
+	URL         string
+	FallbackURL string // optional alternative URL (NIP-94 "fallback" field)
+	Alt         string
+	MimeType    string
+	Blurhash    string
+	Width       int
+	Height      int
 }
 
 // NormalizedPost is a protocol-agnostic intermediate representation of an
@@ -158,6 +159,14 @@ func ExtractHost(rawURL string) string {
 }
 
 // buildImeta constructs a NIP-94 imeta tag from an ImageInfo.
+// Fields follow the NIP-94 space-separated key-value format:
+//
+//	url      — primary media URL (required)
+//	m        — MIME type
+//	dim      — pixel dimensions (WxH)
+//	blurhash — perceptual hash for placeholder rendering
+//	alt      — accessibility description
+//	fallback — alternate URL when the primary CDN is unreachable
 func buildImeta(img ImageInfo) nostr.Tag {
 	parts := []string{"imeta", "url " + img.URL}
 	if img.MimeType != "" {
@@ -171,6 +180,9 @@ func buildImeta(img ImageInfo) nostr.Tag {
 	}
 	if img.Alt != "" {
 		parts = append(parts, "alt "+img.Alt)
+	}
+	if img.FallbackURL != "" && img.FallbackURL != img.URL {
+		parts = append(parts, "fallback "+img.FallbackURL)
 	}
 	return nostr.Tag(parts)
 }

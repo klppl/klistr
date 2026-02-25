@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"golang.org/x/time/rate"
 )
 
 // EventHandler is a function that processes a Nostr event.
@@ -309,7 +310,13 @@ type Publisher struct {
 	circuits map[string]*relayCircuit
 	pool     *nostr.SimplePool
 	poolOnce sync.Once
+	limiter  *rate.Limiter
 }
+
+const (
+	publishRateLimit = rate.Limit(2) // 2 events per second per publisher
+	publishRateBurst = 5             // burst allowance to handle short threads
+)
 
 // NewPublisher creates a new Publisher.
 func NewPublisher(writeRelays []string) *Publisher {
@@ -320,6 +327,7 @@ func NewPublisher(writeRelays []string) *Publisher {
 	return &Publisher{
 		relays:   append([]string{}, writeRelays...),
 		circuits: circuits,
+		limiter:  rate.NewLimiter(publishRateLimit, publishRateBurst),
 	}
 }
 
@@ -437,6 +445,12 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 		slog.Warn("all relay circuits are open; event not published",
 			"id", event.ID, "skipped", len(allRelays))
 		return fmt.Errorf("all %d relays have open circuits", len(allRelays))
+	}
+
+	// Wait for an outbound rate limit token so we don't trip anti-spam
+	// circuits on strict relays (e.g. relay.damus.io) during sync bursts.
+	if err := p.limiter.Wait(ctx); err != nil {
+		return fmt.Errorf("outbound rate limit wait: %w", err)
 	}
 
 	// Honour explicit cancellation but otherwise use an independent deadline.

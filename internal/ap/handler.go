@@ -41,10 +41,10 @@ type APHandler struct {
 		GetAPFollowing(followerID string) ([]string, error)
 		StoreActorKey(pubkey, actorURL string) error
 	}
-	Federator          *Federator
-	NostrRelay         string
-	ShowSourceLink     *atomic.Bool // append original post URL at the bottom of bridged notes
-	AutoAcceptFollows  *atomic.Bool // when false, incoming follows are rejected instead of accepted
+	Federator         *Federator
+	NostrRelay        string
+	ShowSourceLink    *atomic.Bool // append original post URL at the bottom of bridged notes
+	AutoAcceptFollows *atomic.Bool // when false, incoming follows are rejected instead of accepted
 }
 
 // HandleActivity processes an incoming ActivityPub activity.
@@ -686,6 +686,7 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		}
 		images = append(images, bridge.ImageInfo{
 			URL:      att.URL,
+			Alt:      att.Name, // AP "name" field is the alt text / description
 			MimeType: att.MediaType,
 			Blurhash: att.Blurhash,
 			Width:    att.Width,
@@ -1115,14 +1116,13 @@ func (h *APHandler) sendFollowNotification(ctx context.Context, followerActorURL
 	}
 }
 
-
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
 // postVisibility classifies the audience of an incoming activity:
 //   - "public"    — addressed to the ActivityStreams public URI
 //   - "direct"    — addressed directly to the local actor (DM), but not public
 //   - "followers" — everything else (followers-only, unlisted); we received
-//                   it in our inbox so we are a valid audience
+//     it in our inbox so we are a valid audience
 func (h *APHandler) postVisibility(activity IncomingActivity) string {
 	for _, r := range activity.To {
 		if r == PublicURI {
@@ -1276,7 +1276,6 @@ func buildMetadataContentFromActor(actor *Actor, localDomain string) string {
 	return buildMetadataContent(actor, localDomain)
 }
 
-
 // anchorHrefRe matches the href attribute value inside an <a> tag,
 // restricted to http/https URLs (skips mailto:, javascript:, etc.).
 var anchorHrefRe = regexp.MustCompile(`(?i)<a\s[^>]*\bhref\s*=\s*["'](https?://[^"']+)["']`)
@@ -1292,4 +1291,3 @@ func extractHrefsFromHTML(html string) []string {
 	}
 	return hrefs
 }
-

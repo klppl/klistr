@@ -356,16 +356,16 @@ func mapToActor(m map[string]interface{}) *Actor {
 		return nil
 	}
 	actor := &Actor{
-		ID:               getString(m, "id"),
-		Type:             getString(m, "type"),
-		Name:             getString(m, "name"),
+		ID:                getString(m, "id"),
+		Type:              getString(m, "type"),
+		Name:              getString(m, "name"),
 		PreferredUsername: getString(m, "preferredUsername"),
-		Summary:          getString(m, "summary"),
-		Inbox:            getString(m, "inbox"),
-		Outbox:           getString(m, "outbox"),
-		Followers:        getString(m, "followers"),
-		Following:        getString(m, "following"),
-		URL:              getString(m, "url"),
+		Summary:           getString(m, "summary"),
+		Inbox:             getString(m, "inbox"),
+		Outbox:            getString(m, "outbox"),
+		Followers:         getString(m, "followers"),
+		Following:         getString(m, "following"),
+		URL:               getString(m, "url"),
 	}
 
 	// Extract publicKey
@@ -455,6 +455,7 @@ func mapToNote(m map[string]interface{}) *Note {
 				Type:      getString(a, "type"),
 				URL:       getString(a, "url"),
 				MediaType: getString(a, "mediaType"),
+				Name:      getString(a, "name"), // alt text / image description
 				Blurhash:  getString(a, "blurhash"),
 				Width:     int(width),
 				Height:    int(height),

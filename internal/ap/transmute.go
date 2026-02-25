@@ -41,12 +41,10 @@ func (tc *TransmuteContext) objectURL(eventID string) string {
 }
 
 var (
-	linebreakRe = regexp.MustCompile(`\n`)
-	tagRefRe    = regexp.MustCompile(`\n{0,2}#\[\d+\]$`)
-	trailingRe  = regexp.MustCompile(`\s+$`)
-	urlRe       = regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
-	hashtagRe   = regexp.MustCompile(`#(\w+)`)
-	mentionRe   = regexp.MustCompile(`nostr:(npub|nprofile|note|nevent|naddr)[a-z0-9]+`)
+	tagRefRe   = regexp.MustCompile(`\n{0,2}#\[\d+\]$`)
+	trailingRe = regexp.MustCompile(`\s+$`)
+	urlRe      = regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
+	mentionRe  = regexp.MustCompile(`nostr:(npub|nprofile|note|nevent|naddr)[a-z0-9]+`)
 
 	// Markdown inline patterns used by markdownToHTML.
 	mdBoldRe   = regexp.MustCompile(`\*\*(.+?)\*\*`)
@@ -776,6 +774,18 @@ func parseImeta(entries []string) *Attachment {
 			att.Blurhash = parts[1]
 		case "dim":
 			fmt.Sscanf(parts[1], "%dx%d", &att.Width, &att.Height)
+		case "alt":
+			// AP uses "name" as the alt-text field for media attachments.
+			att.Name = parts[1]
+		case "fallback":
+			// Store fallback as a second-priority URL. If the primary URL is
+			// empty (shouldn't happen) promote fallback to URL.
+			if att.URL == "" {
+				att.URL = parts[1]
+			}
+			// Otherwise we keep the fallback for informational purposes;
+			// AP does not have a standard fallback field so it is silently
+			// available to callers that inspect the raw map.
 		}
 	}
 	if att.URL == "" {

@@ -363,9 +363,10 @@ func blobToCDNURL(authorDID, cid, mimeType string) string {
 	return fmt.Sprintf("https://cdn.bsky.app/img/feed_fullsize/plain/%s/%s@%s", authorDID, cid, format)
 }
 
-// extractImagesFromRecord returns bridge.ImageInfo for every image in an
-// app.bsky.embed.images embed block. authorDID is required to construct
-// CDN blob URLs. Returns nil if the record has no image embed.
+// extractImagesFromRecord returns bridge.ImageInfo for every image or video in
+// an app.bsky.embed.images or app.bsky.embed.video embed block. authorDID is
+// required to construct CDN blob URLs. Returns nil if the record has no
+// image/video embed.
 func extractImagesFromRecord(record map[string]interface{}, authorDID string) []bridge.ImageInfo {
 	if record == nil || authorDID == "" {
 		return nil
@@ -374,37 +375,77 @@ func extractImagesFromRecord(record map[string]interface{}, authorDID string) []
 	if !ok {
 		return nil
 	}
-	if embedType, _ := embed["$type"].(string); embedType != "app.bsky.embed.images" {
-		return nil
-	}
-	images, ok := embed["images"].([]interface{})
-	if !ok {
-		return nil
-	}
+	embedType, _ := embed["$type"].(string)
 
-	var result []bridge.ImageInfo
-	for _, img := range images {
-		image, ok := img.(map[string]interface{})
+	switch embedType {
+	case "app.bsky.embed.images":
+		images, ok := embed["images"].([]interface{})
 		if !ok {
-			continue
+			return nil
 		}
-		blob, ok := image["image"].(map[string]interface{})
-		if !ok {
-			continue
+
+		var result []bridge.ImageInfo
+		for _, img := range images {
+			image, ok := img.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			blob, ok := image["image"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			ref, ok := blob["ref"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			cid, _ := ref["$link"].(string)
+			if cid == "" {
+				continue
+			}
+			mimeType, _ := blob["mimeType"].(string)
+			alt, _ := image["alt"].(string)
+
+			var width, height int
+			if ar, ok := image["aspectRatio"].(map[string]interface{}); ok {
+				if w, ok := ar["width"].(float64); ok {
+					width = int(w)
+				}
+				if h, ok := ar["height"].(float64); ok {
+					height = int(h)
+				}
+			}
+
+			result = append(result, bridge.ImageInfo{
+				URL:      blobToCDNURL(authorDID, cid, mimeType),
+				Alt:      alt,
+				MimeType: mimeType,
+				Width:    width,
+				Height:   height,
+			})
 		}
-		ref, ok := blob["ref"].(map[string]interface{})
+		return result
+
+	case "app.bsky.embed.video":
+		video, ok := embed["video"].(map[string]interface{})
 		if !ok {
-			continue
+			return nil
+		}
+		ref, ok := video["ref"].(map[string]interface{})
+		if !ok {
+			return nil
 		}
 		cid, _ := ref["$link"].(string)
 		if cid == "" {
-			continue
+			return nil
 		}
-		mimeType, _ := blob["mimeType"].(string)
-		alt, _ := image["alt"].(string)
+		mimeType, _ := video["mimeType"].(string)
+		if mimeType == "" {
+			mimeType = "video/mp4"
+		}
+		alt, _ := embed["alt"].(string)
 
 		var width, height int
-		if ar, ok := image["aspectRatio"].(map[string]interface{}); ok {
+		if ar, ok := embed["aspectRatio"].(map[string]interface{}); ok {
 			if w, ok := ar["width"].(float64); ok {
 				width = int(w)
 			}
@@ -413,15 +454,18 @@ func extractImagesFromRecord(record map[string]interface{}, authorDID string) []
 			}
 		}
 
-		result = append(result, bridge.ImageInfo{
-			URL:      blobToCDNURL(authorDID, cid, mimeType),
+		// Bluesky serves video as HLS; the playlist URL is publicly accessible.
+		playlistURL := fmt.Sprintf("https://video.bsky.app/watch/%s/%s/playlist.m3u8", authorDID, cid)
+		return []bridge.ImageInfo{{
+			URL:      playlistURL,
 			Alt:      alt,
 			MimeType: mimeType,
 			Width:    width,
 			Height:   height,
-		})
+		}}
 	}
-	return result
+
+	return nil
 }
 
 // ─── Hashtag + quote extraction (Bluesky → Nostr) ────────────────────────────

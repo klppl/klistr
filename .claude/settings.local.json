@@ -19,7 +19,9 @@
       "Bash(go vet:*)",
       "Bash(echo exit:$?:*)",
       "Bash(sudo docker compose ps 2>&1 && sudo docker compose logs --tail=60 klistr 2>&1)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(go doc:*)",
+      "Bash(grep Path:*)"
     ]
   }
 }

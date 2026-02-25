@@ -409,11 +409,8 @@ func (p *Poller) handleNotification(ctx context.Context, n *Notification) {
 		// If the parent post was bridged, we know its Nostr event ID and can
 		// create a proper kind-1 reply signed with a derived key for the
 		// Bluesky author's DID (same mechanism as AP actor bridging).
-		if p.bridgeReply(ctx, n) {
-			return
-		}
-		// Parent not found in DB — fall back to a DM notification.
-		p.sendDMNotification(ctx, n)
+		// If the parent is not in the DB, drop silently — no DM notification.
+		p.bridgeReply(ctx, n)
 
 	case "mention", "quote":
 		// No clear parent Nostr post to thread into; notify via DM.

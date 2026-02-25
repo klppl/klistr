@@ -549,6 +549,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <h2>Settings</h2>
   <div style="display:flex;flex-direction:column;gap:16px">
 
+    <!-- Auto-accept follows -->
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;user-select:none">
+      <input type="checkbox" id="set-auto-accept-follows" style="width:15px;height:15px;accent-color:var(--blue);cursor:pointer">
+      Auto-accept incoming Fediverse follows (uncheck to reject all)
+    </label>
+
     <!-- Show source link -->
     <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;user-select:none">
       <input type="checkbox" id="set-show-source-link" style="width:15px;height:15px;accent-color:var(--blue);cursor:pointer">
@@ -1337,6 +1343,7 @@ async function loadSettings() {
   try {
     const r = await fetch('/web/api/settings');
     const d = await r.json();
+    document.getElementById('set-auto-accept-follows').checked = d.auto_accept_follows !== false;
     document.getElementById('set-show-source-link').checked = !!d.show_source_link;
     document.getElementById('set-display-name').value = d.display_name || '';
     document.getElementById('set-summary').value = d.summary || '';
@@ -1361,6 +1368,7 @@ async function saveSettings() {
   try {
     const zapVal = document.getElementById('set-zap-split').value;
     const body = {
+      auto_accept_follows: document.getElementById('set-auto-accept-follows').checked,
       show_source_link: document.getElementById('set-show-source-link').checked,
       display_name:     document.getElementById('set-display-name').value,
       summary:          document.getElementById('set-summary').value,

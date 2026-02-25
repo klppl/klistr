@@ -99,25 +99,45 @@ type PropertyValue struct {
 	Value string `json:"value"`
 }
 
-// Note represents an ActivityPub Note.
+// Note represents an ActivityPub Note (and related types: Article, Question).
 type Note struct {
-	Context      interface{}  `json:"@context,omitempty"`
-	ID           string       `json:"id"`
-	Type         string       `json:"type"`
-	AttributedTo string       `json:"attributedTo"`
-	Content      string       `json:"content"`
-	Published    string       `json:"published,omitempty"`
-	To           []string     `json:"to,omitempty"`
-	CC           []string     `json:"cc,omitempty"`
-	Tag          []interface{} `json:"tag,omitempty"`
-	Attachment   []Attachment `json:"attachment,omitempty"`
-	URL          string       `json:"url,omitempty"`
-	InReplyTo    string       `json:"inReplyTo,omitempty"`
-	QuoteURL     string       `json:"quoteUrl,omitempty"`
-	Sensitive    bool         `json:"sensitive,omitempty"`
-	Summary      string       `json:"summary,omitempty"`
-	Generator    *Generator   `json:"generator,omitempty"`
-	ProxyOf      []Proxy      `json:"proxyOf,omitempty"`
+	Context      interface{}      `json:"@context,omitempty"`
+	ID           string           `json:"id"`
+	Type         string           `json:"type"`
+	AttributedTo string           `json:"attributedTo"`
+	Name         string           `json:"name,omitempty"` // Article title or Question text
+	Content      string           `json:"content"`
+	Published    string           `json:"published,omitempty"`
+	To           []string         `json:"to,omitempty"`
+	CC           []string         `json:"cc,omitempty"`
+	Tag          []interface{}    `json:"tag,omitempty"`
+	Attachment   []Attachment     `json:"attachment,omitempty"`
+	URL          string           `json:"url,omitempty"`
+	InReplyTo    string           `json:"inReplyTo,omitempty"`
+	QuoteURL     string           `json:"quoteUrl,omitempty"`
+	Sensitive    bool             `json:"sensitive,omitempty"`
+	Summary      string           `json:"summary,omitempty"`
+	Generator    *Generator       `json:"generator,omitempty"`
+	ProxyOf      []Proxy          `json:"proxyOf,omitempty"`
+	// Poll fields (type=Question only).
+	OneOf       []QuestionOption `json:"oneOf,omitempty"`
+	AnyOf       []QuestionOption `json:"anyOf,omitempty"`
+	EndTime     string           `json:"endTime,omitempty"`
+	Closed      string           `json:"closed,omitempty"`
+	VotersCount int              `json:"votersCount,omitempty"`
+}
+
+// QuestionOption represents a single poll choice in an AP Question object.
+type QuestionOption struct {
+	Type    string           `json:"type"`
+	Name    string           `json:"name"`
+	Replies *QuestionReplies `json:"replies,omitempty"`
+}
+
+// QuestionReplies holds the vote tally for a poll option.
+type QuestionReplies struct {
+	Type       string `json:"type"`
+	TotalItems int    `json:"totalItems"`
 }
 
 // Attachment represents media attached to a Note.
@@ -186,6 +206,7 @@ type IncomingActivity struct {
 	Type      string          `json:"type"`
 	Actor     string          `json:"actor"`
 	Object    json.RawMessage `json:"object"`
+	Target    json.RawMessage `json:"target,omitempty"` // used by Move activities
 	To        StringOrArray   `json:"to,omitempty"`
 	CC        StringOrArray   `json:"cc,omitempty"`
 	Published string          `json:"published,omitempty"`

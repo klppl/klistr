@@ -46,7 +46,13 @@ var (
 	trailingRe  = regexp.MustCompile(`\s+$`)
 	urlRe       = regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
 	hashtagRe   = regexp.MustCompile(`#(\w+)`)
-	mentionRe   = regexp.MustCompile(`nostr:(npub|nprofile)[a-z0-9]+`)
+	mentionRe   = regexp.MustCompile(`nostr:(npub|nprofile|note|nevent|naddr)[a-z0-9]+`)
+
+	// Markdown inline patterns used by markdownToHTML.
+	mdBoldRe   = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	mdItalicRe = regexp.MustCompile(`\*([^*\n]+?)\*`)
+	mdCodeRe   = regexp.MustCompile("`([^`\n]+)`")
+	mdLinkRe   = regexp.MustCompile(`\[([^\[\]]+)\]\((https?://[^)\s]+)\)`)
 )
 
 // NostrDate formats a Unix timestamp as an ISO 8601 string.
@@ -178,6 +184,12 @@ func ToNote(event *nostr.Event, tc *TransmuteContext) *Note {
 			if len(tag) >= 2 {
 				note.Summary = tag[1]
 			}
+		case len(tag) >= 2 && tag[0] == "expiration":
+			// NIP-40: map expiration unix timestamp to AP endTime (RFC3339).
+			var ts int64
+			if _, err := fmt.Sscanf(tag[1], "%d", &ts); err == nil && ts > 0 {
+				note.EndTime = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+			}
 		}
 	}
 
@@ -268,6 +280,271 @@ func ToEmojiReact(event *nostr.Event, tc *TransmuteContext) map[string]interface
 	return obj
 }
 
+// ToZap converts a kind-9735 zap receipt to an AP Zap activity.
+// The Zap type is present in DefaultContext via the mostr.pub namespace.
+// AP servers that do not recognise the type will silently discard the activity.
+func ToZap(event *nostr.Event, tc *TransmuteContext) map[string]interface{} {
+	// Zap receipts target a specific note via 'e' tag; skip profile-only zaps.
+	var reactedID string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "e" {
+			reactedID = tag[1]
+			break
+		}
+	}
+	if reactedID == "" {
+		return nil
+	}
+
+	// Parse the embedded zap request (kind-9734) from the description tag to
+	// extract the sats amount and optional comment left by the zap sender.
+	var amountMsats int64
+	var comment string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "description" {
+			var zapReq struct {
+				Content string     `json:"content"`
+				Tags    [][]string `json:"tags"`
+			}
+			if err := json.Unmarshal([]byte(tag[1]), &zapReq); err == nil {
+				comment = zapReq.Content
+				for _, t := range zapReq.Tags {
+					if len(t) >= 2 && t[0] == "amount" {
+						fmt.Sscanf(t[1], "%d", &amountMsats)
+					}
+				}
+			}
+			break
+		}
+	}
+
+	// Build human-readable content (sats + optional comment).
+	content := comment
+	if amountMsats > 0 {
+		sats := amountMsats / 1000
+		if comment != "" {
+			content = fmt.Sprintf("⚡ %d sats: %s", sats, comment)
+		} else {
+			content = fmt.Sprintf("⚡ %d sats", sats)
+		}
+	}
+
+	act := map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       tc.objectURL(event.ID),
+		"type":     "Zap",
+		"actor":    tc.LocalActorURL,
+		"object":   tc.objectURL(reactedID),
+		"to":       []string{PublicURI},
+		"cc":       []string{tc.LocalActorURL + "/followers"},
+		"proxyOf":  []Proxy{toNoteProxy(event)},
+	}
+	if content != "" {
+		act["content"] = content
+	}
+	return act
+}
+
+// ToQuestion converts a Nostr kind-1068 poll event (NIP-69) to an AP Question object.
+// Returns nil if the event has no poll options.
+func ToQuestion(event *nostr.Event, tc *TransmuteContext) *Note {
+	var pollType, closedAt string
+
+	for _, tag := range event.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+		switch tag[0] {
+		case "poll_type":
+			pollType = tag[1]
+		case "closed_at":
+			var t int64
+			if _, err := fmt.Sscanf(tag[1], "%d", &t); err == nil && t > 0 {
+				closedAt = time.Unix(t, 0).UTC().Format(time.RFC3339)
+			}
+		}
+	}
+
+	// Collect options in NIP-69 order (poll_option index tag[1], text tag[2]).
+	var opts []QuestionOption
+	for _, tag := range event.Tags {
+		if len(tag) >= 3 && tag[0] == "poll_option" {
+			opts = append(opts, QuestionOption{Type: "Note", Name: tag[2]})
+		}
+	}
+	if len(opts) == 0 {
+		return nil
+	}
+
+	q := &Note{
+		ID:           tc.objectURL(event.ID),
+		Type:         "Question",
+		AttributedTo: tc.LocalActorURL,
+		Content:      html.EscapeString(event.Content),
+		Published:    event.CreatedAt.Time().UTC().Format(time.RFC3339),
+		To:           []string{PublicURI},
+		CC:           []string{tc.LocalActorURL + "/followers"},
+		EndTime:      closedAt,
+		ProxyOf:      []Proxy{toNoteProxy(event)},
+	}
+
+	if pollType == "multiplechoice" {
+		q.AnyOf = opts
+	} else {
+		q.OneOf = opts
+	}
+
+	return q
+}
+
+// ToArticle converts a Nostr kind-30023 long-form article to an AP Article object.
+// The returned *Note has Type="Article" and Name set to the article title.
+func ToArticle(event *nostr.Event, tc *TransmuteContext) *Note {
+	var title, summary, imageURL, publishedAt string
+	var hashtags []interface{}
+
+	var endTime string
+	for _, tag := range event.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+		switch tag[0] {
+		case "title":
+			title = tag[1]
+		case "summary":
+			summary = tag[1]
+		case "image":
+			imageURL = tag[1]
+		case "published_at":
+			publishedAt = tag[1]
+		case "t":
+			hashtags = append(hashtags, Hashtag{
+				Type: "Hashtag",
+				Href: tc.baseURL("/tags/" + tag[1]),
+				Name: "#" + tag[1],
+			})
+		case "expiration":
+			var ts int64
+			if _, err := fmt.Sscanf(tag[1], "%d", &ts); err == nil && ts > 0 {
+				endTime = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+			}
+		}
+	}
+
+	// Prefer published_at for the canonical timestamp.
+	ts := event.CreatedAt
+	if publishedAt != "" {
+		var t int64
+		if _, err := fmt.Sscanf(publishedAt, "%d", &t); err == nil && t > 0 {
+			ts = nostr.Timestamp(t)
+		}
+	}
+
+	articleURL := tc.objectURL(event.ID)
+
+	note := &Note{
+		ID:           articleURL,
+		Type:         "Article",
+		Name:         title,
+		AttributedTo: tc.actorURL(event.PubKey),
+		Content:      markdownToHTML(event.Content),
+		Summary:      summary,
+		Published:    NostrDate(ts),
+		URL:          articleURL,
+		To:           []string{PublicURI},
+		CC:           []string{tc.actorURL(event.PubKey) + "/followers"},
+		Tag:          hashtags,
+		EndTime:      endTime,
+		Generator: &Generator{
+			Type: "Application",
+			Name: "klistr",
+			URL:  "https://github.com/klppl/klistr",
+		},
+		ProxyOf: []Proxy{toNoteProxy(event)},
+	}
+
+	if imageURL != "" {
+		note.Attachment = append(note.Attachment, Attachment{
+			Type: "Image",
+			URL:  imageURL,
+		})
+	}
+
+	return note
+}
+
+// markdownToHTML converts a Markdown string to HTML. It handles the most common
+// constructs: fenced code blocks, headings (h1–h3), paragraphs, and inline
+// elements (bold, italic, inline code, links). Edge cases like nested emphasis
+// or definition lists are not handled but the plain text is still preserved.
+func markdownToHTML(md string) string {
+	if md == "" {
+		return ""
+	}
+	var out strings.Builder
+	// Split on fenced code block markers; odd-indexed segments are code content.
+	segments := strings.Split(md, "```")
+	for i, seg := range segments {
+		if i%2 == 0 {
+			out.WriteString(renderMarkdownBlocks(seg))
+		} else {
+			// First line of seg is the optional language hint; skip it.
+			nl := strings.IndexByte(seg, '\n')
+			code := seg
+			if nl >= 0 {
+				code = seg[nl+1:]
+			}
+			out.WriteString("<pre><code>")
+			out.WriteString(html.EscapeString(strings.TrimRight(code, "\n")))
+			out.WriteString("</code></pre>")
+		}
+	}
+	return out.String()
+}
+
+// renderMarkdownBlocks processes a non-code Markdown segment into HTML block elements.
+func renderMarkdownBlocks(text string) string {
+	var out strings.Builder
+	for _, block := range strings.Split(text, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		switch {
+		case block == "---" || block == "***" || block == "___":
+			out.WriteString("<hr />")
+		case strings.HasPrefix(block, "### "):
+			out.WriteString("<h3>" + renderInlineMarkdown(block[4:]) + "</h3>")
+		case strings.HasPrefix(block, "## "):
+			out.WriteString("<h2>" + renderInlineMarkdown(block[3:]) + "</h2>")
+		case strings.HasPrefix(block, "# "):
+			out.WriteString("<h1>" + renderInlineMarkdown(block[2:]) + "</h1>")
+		default:
+			lines := strings.Split(block, "\n")
+			rendered := make([]string, len(lines))
+			for i, line := range lines {
+				rendered[i] = renderInlineMarkdown(line)
+			}
+			out.WriteString("<p>" + strings.Join(rendered, "<br />") + "</p>")
+		}
+	}
+	return out.String()
+}
+
+// renderInlineMarkdown converts inline Markdown syntax to HTML within a single line.
+func renderInlineMarkdown(s string) string {
+	s = html.EscapeString(s)
+	// Links: [text](url)
+	s = mdLinkRe.ReplaceAllString(s, `<a href="$2" rel="nofollow noopener noreferrer" target="_blank">$1</a>`)
+	// Inline code: `code` (before bold/italic to protect content from further replacement)
+	s = mdCodeRe.ReplaceAllString(s, "<code>$1</code>")
+	// Bold: **text**
+	s = mdBoldRe.ReplaceAllString(s, "<strong>$1</strong>")
+	// Italic: *text* (remaining single asterisks after bold replacement)
+	s = mdItalicRe.ReplaceAllString(s, "<em>$1</em>")
+	return s
+}
+
 // ToDelete converts a kind-5 deletion event to an AP Delete.
 func ToDelete(event *nostr.Event, tc *TransmuteContext) *Activity {
 	deletedID := findLastEventTag(event)
@@ -350,6 +627,18 @@ func BuildAccept(followActivity map[string]interface{}, localActorID string, fol
 	}
 }
 
+// BuildReject creates an AP Reject activity for a Follow.
+func BuildReject(followActivity map[string]interface{}, localActorID string, followerID string) map[string]interface{} {
+	return map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       localActorID + "#reject-" + fmt.Sprintf("%d", time.Now().Unix()),
+		"type":     "Reject",
+		"actor":    localActorID,
+		"object":   followActivity,
+		"to":       []string{followerID},
+	}
+}
+
 // IsRepost returns true if a kind-1 event is a pure repost (no content, has quote tag).
 func IsRepost(event *nostr.Event) bool {
 	if event.Content != "" && !regexp.MustCompile(`^#\[\d+\]$`).MatchString(event.Content) {
@@ -408,10 +697,15 @@ func renderContent(content string, tags nostr.Tags, tc *TransmuteContext) string
 	content = tagRefRe.ReplaceAllString(content, "")
 	content = trailingRe.ReplaceAllString(content, "")
 
-	// Replace inline nostr: URIs with AP links.
+	// Replace inline nostr: URIs with links to njump.me so AP readers can
+	// follow them. This covers all NIP-19 types: npub, nprofile, note, nevent, naddr.
 	content = mentionRe.ReplaceAllStringFunc(content, func(s string) string {
-		// Just render as a link for now.
-		return fmt.Sprintf(`<a href="%s/users/%s">%s</a>`, tc.LocalDomain, s[6:14], s[:14]+"...")
+		bech32 := s[6:] // strip "nostr:" prefix
+		label := bech32
+		if len(label) > 16 {
+			label = label[:16] + "…"
+		}
+		return fmt.Sprintf(`<a href="https://njump.me/%s">%s</a>`, bech32, label)
 	})
 
 	// Escape and linkify.
@@ -486,6 +780,15 @@ func parseImeta(entries []string) *Attachment {
 	}
 	if att.URL == "" {
 		return nil
+	}
+	// Set the AP attachment type from the MIME prefix.
+	switch {
+	case strings.HasPrefix(att.MediaType, "image/"):
+		att.Type = "Image"
+	case strings.HasPrefix(att.MediaType, "video/"):
+		att.Type = "Video"
+	case strings.HasPrefix(att.MediaType, "audio/"):
+		att.Type = "Audio"
 	}
 	return att
 }

@@ -53,6 +53,9 @@ type NormalizedPost struct {
 	SourceURL      string
 	ShowSourceLink bool
 
+	// NIP-40 expiration (unix timestamp). Zero means no expiry.
+	ExpiresAt int64
+
 	// Protocol identity.
 	ProxyID       string // proxy tag value (AP note ID or AT URI)
 	ProxyProtocol string // "activitypub" or "atproto"
@@ -129,6 +132,11 @@ func BuildKind1Event(post NormalizedPost) *nostr.Event {
 	if post.ShowSourceLink && post.SourceURL != "" && !strings.Contains(content, post.SourceURL) {
 		tags = append(tags, nostr.Tag{"r", post.SourceURL})
 		content += "\n\n🔗 " + post.SourceURL
+	}
+
+	// NIP-40 expiration tag.
+	if post.ExpiresAt > 0 {
+		tags = append(tags, nostr.Tag{"expiration", fmt.Sprintf("%d", post.ExpiresAt)})
 	}
 
 	return &nostr.Event{

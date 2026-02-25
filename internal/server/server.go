@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,9 +41,52 @@ type ActorResolver interface {
 	PublicKey(apActorURL string) (string, error)
 }
 
-// maxConcurrentActivities is the maximum number of inbox activities processed
-// concurrently. Activities arriving beyond this limit receive a 503 response.
-const maxConcurrentActivities = 50
+const (
+	// maxConcurrentActivities is the total inbox concurrency cap.
+	// Activities arriving beyond this limit receive a 503 response.
+	maxConcurrentActivities = 50
+
+	// maxPerOriginConcurrency is the per-origin (AP actor hostname) concurrency cap.
+	// Prevents a single noisy origin from consuming the entire global semaphore.
+	maxPerOriginConcurrency = 5
+)
+
+// inboxLimiter is a per-origin concurrent-activity counter.
+// It tracks how many inbox activities from each origin hostname are currently
+// in flight and rejects new ones once the per-origin cap is reached.
+type inboxLimiter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newInboxLimiter() *inboxLimiter {
+	return &inboxLimiter{counts: make(map[string]int)}
+}
+
+// acquire increments the counter for origin and returns true.
+// Returns false (without incrementing) when the per-origin cap is exceeded.
+func (l *inboxLimiter) acquire(origin string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[origin] >= maxPerOriginConcurrency {
+		return false
+	}
+	l.counts[origin]++
+	return true
+}
+
+// release decrements the counter for origin and removes the entry when it
+// reaches zero so the map does not grow unboundedly.
+func (l *inboxLimiter) release(origin string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[origin] > 0 {
+		l.counts[origin]--
+	}
+	if l.counts[origin] == 0 {
+		delete(l.counts, origin)
+	}
+}
 
 // Server is the main HTTP server for klistr.
 type Server struct {
@@ -52,8 +97,9 @@ type Server struct {
 	router        *chi.Mux
 	actorKeyStore ActorKeyStore
 	actorResolver ActorResolver
-	startedAt     time.Time
-	inboxSem      chan struct{} // bounded concurrency for inbox processing
+	startedAt      time.Time
+	inboxSem       chan struct{}  // global concurrency cap for inbox processing
+	inboxLimiter   *inboxLimiter // per-origin concurrency cap
 
 	// Optional — set before Start() is called.
 	logBroadcaster  *LogBroadcaster
@@ -62,7 +108,8 @@ type Server struct {
 	followPublisher FollowPublisher
 	bskyClient      BskyClient
 	relayManager    RelayManager
-	showSourceLink  *atomic.Bool
+	showSourceLink      *atomic.Bool
+	autoAcceptFollows   *atomic.Bool
 
 	// nip05Cache caches NIP-05 remote handle lookups (lowercase name → pubkey).
 	// Eliminates repeated WebFinger calls for the same handle across concurrent
@@ -81,7 +128,9 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 		actorResolver:  actorResolver,
 		startedAt:      time.Now(),
 		inboxSem:       make(chan struct{}, maxConcurrentActivities),
-		showSourceLink: &atomic.Bool{},
+		inboxLimiter:   newInboxLimiter(),
+		showSourceLink:    &atomic.Bool{},
+		autoAcceptFollows: func() *atomic.Bool { b := &atomic.Bool{}; b.Store(true); return b }(),
 	}
 	s.router = s.buildRouter()
 	return s
@@ -111,6 +160,10 @@ func (s *Server) SetRelayManager(rm RelayManager) { s.relayManager = rm }
 // SetShowSourceLink attaches the shared atomic bool controlling whether bridged
 // notes include a source link. Updated live by the admin settings API.
 func (s *Server) SetShowSourceLink(b *atomic.Bool) { s.showSourceLink = b }
+
+// SetAutoAcceptFollows attaches the shared atomic bool controlling whether
+// incoming AP follows are auto-accepted. Updated live by the admin settings API.
+func (s *Server) SetAutoAcceptFollows(b *atomic.Bool) { s.autoAcceptFollows = b }
 
 // Start runs the HTTP server until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) {
@@ -177,10 +230,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	// Service actor.
 	r.Get("/actor", s.handleServiceActor)
 
-	// Tags (stub).
-	r.Get("/tags/{tag}", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, []interface{}{}, http.StatusOK)
-	})
+	r.Get("/tags/{tag}", s.handleTag)
 
 	// Root — basic info page.
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +380,8 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 	apResponse(w, collection)
 }
 
+const outboxPageSize = 20
+
 func (s *Server) handleOutbox(w http.ResponseWriter, r *http.Request) {
 	username := chi.URLParam(r, "username")
 	if username != s.cfg.NostrUsername {
@@ -338,9 +390,63 @@ func (s *Server) handleOutbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+	outboxURL := localActorURL + "/outbox"
+
+	// Local objects have ap_id starting with our objects URL prefix.
+	objectPrefix := s.cfg.BaseURL("/objects/")
+
+	if r.URL.Query().Get("page") == "true" {
+		// Return a page of Create activities wrapping local object URLs.
+		ids, err := s.store.GetRecentLocalObjects(objectPrefix, outboxPageSize)
+		if err != nil {
+			slog.Warn("outbox: failed to fetch local objects", "error", err)
+			ids = nil
+		}
+
+		items := make([]interface{}, 0, len(ids))
+		for _, apID := range ids {
+			items = append(items, map[string]interface{}{
+				"type":  "Create",
+				"id":    apID + "#create",
+				"actor": localActorURL,
+				"object": apID,
+				"to":   []string{ap.PublicURI},
+			})
+		}
+
+		page := map[string]interface{}{
+			"@context":     ap.DefaultContext,
+			"id":           outboxURL + "?page=true",
+			"type":         "OrderedCollectionPage",
+			"partOf":       outboxURL,
+			"orderedItems": items,
+		}
+		apResponse(w, page)
+		return
+	}
+
+	// Root collection: report count and link to first page.
+	count, err := s.store.GetLocalObjectCount(objectPrefix)
+	if err != nil {
+		slog.Warn("outbox: failed to count local objects", "error", err)
+		count = 0
+	}
+
+	collection := map[string]interface{}{
+		"@context":   ap.DefaultContext,
+		"id":         outboxURL,
+		"type":       "OrderedCollection",
+		"totalItems": count,
+		"first":      outboxURL + "?page=true",
+	}
+	apResponse(w, collection)
+}
+
+func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
+	tag := chi.URLParam(r, "tag")
 	collection := ap.OrderedCollection{
 		Context:      ap.DefaultContext,
-		ID:           localActorURL + "/outbox",
+		ID:           s.cfg.BaseURL("/tags/" + tag),
 		Type:         "OrderedCollection",
 		TotalItems:   0,
 		OrderedItems: []interface{}{},
@@ -364,15 +470,29 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle the activity asynchronously within a bounded concurrency limit.
+	// Derive the origin hostname for per-actor rate limiting.
+	// Prefer the actor URL from the body; fall back to the remote IP.
+	origin := actorOrigin(body, r.RemoteAddr)
+
+	// Per-origin concurrency check (before the global semaphore).
+	if !s.inboxLimiter.acquire(origin) {
+		slog.Warn("per-origin inbox rate limit exceeded", "origin", origin)
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	// Global concurrency check.
 	select {
 	case s.inboxSem <- struct{}{}:
 	default:
+		s.inboxLimiter.release(origin)
 		slog.Warn("inbox overloaded, dropping activity", "remote", r.RemoteAddr)
 		http.Error(w, "too many requests", http.StatusServiceUnavailable)
 		return
 	}
+
 	go func() {
+		defer s.inboxLimiter.release(origin)
 		defer func() { <-s.inboxSem }()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -609,6 +729,26 @@ func (s *Server) handleNodeInfoSchema(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheHeaders(w, 3600)
 	jsonResponse(w, info, http.StatusOK)
+}
+
+// actorOrigin extracts the hostname of the AP actor from the raw activity body.
+// Falls back to the remote IP address if the actor field is absent or unparseable.
+// Used as the key for per-origin inbox rate limiting.
+func actorOrigin(body []byte, remoteAddr string) string {
+	var a struct {
+		Actor string `json:"actor"`
+	}
+	if json.Unmarshal(body, &a) == nil && a.Actor != "" {
+		if u, err := url.Parse(a.Actor); err == nil && u.Host != "" {
+			return u.Host
+		}
+	}
+	// Fallback: use the connecting IP (strip port if present).
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 // ─── Utility functions ────────────────────────────────────────────────────────

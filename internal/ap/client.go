@@ -308,6 +308,7 @@ func mapToNote(m map[string]interface{}) *Note {
 	note := &Note{
 		ID:           getString(m, "id"),
 		Type:         getString(m, "type"),
+		Name:         getString(m, "name"),
 		AttributedTo: getString(m, "attributedTo"),
 		Content:      getString(m, "content"),
 		Published:    getString(m, "published"),
@@ -366,7 +367,44 @@ func mapToNote(m map[string]interface{}) *Note {
 		}
 	}
 
+	// Extract poll fields (AP Question).
+	note.OneOf = extractQuestionOptions(m, "oneOf")
+	note.AnyOf = extractQuestionOptions(m, "anyOf")
+	note.EndTime = getString(m, "endTime")
+	note.Closed = getString(m, "closed")
+	if vc, ok := m["votersCount"].(float64); ok {
+		note.VotersCount = int(vc)
+	}
+
 	return note
+}
+
+// extractQuestionOptions parses a oneOf/anyOf array from an AP Question map.
+func extractQuestionOptions(m map[string]interface{}, key string) []QuestionOption {
+	arr, ok := m[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	opts := make([]QuestionOption, 0, len(arr))
+	for _, item := range arr {
+		opt, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		qo := QuestionOption{
+			Type: getString(opt, "type"),
+			Name: getString(opt, "name"),
+		}
+		if replies, ok := opt["replies"].(map[string]interface{}); ok {
+			totalItems, _ := replies["totalItems"].(float64)
+			qo.Replies = &QuestionReplies{
+				Type:       getString(replies, "type"),
+				TotalItems: int(totalItems),
+			}
+		}
+		opts = append(opts, qo)
+	}
+	return opts
 }
 
 // IsActor returns true if the object type is an actor type.

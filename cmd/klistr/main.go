@@ -193,6 +193,10 @@ func main() {
 	if v, ok := store.GetKV("setting_show_source_link"); ok && v != "" {
 		cfg.ShowSourceLink = v == "true"
 	}
+	autoAcceptFollowsVal := true // default: auto-accept
+	if v, ok := store.GetKV("setting_auto_accept_follows"); ok && v != "" {
+		autoAcceptFollowsVal = v == "true"
+	}
 	if v, ok := store.GetKV("setting_display_name"); ok {
 		cfg.NostrDisplayName = v
 	}
@@ -217,9 +221,11 @@ func main() {
 		}
 	}
 
-	// Shared atomic bool for ShowSourceLink — updated live by the admin settings API.
+	// Shared atomic bools — updated live by the admin settings API.
 	showSourceLink := &atomic.Bool{}
 	showSourceLink.Store(cfg.ShowSourceLink)
+	autoAcceptFollowsBool := &atomic.Bool{}
+	autoAcceptFollowsBool.Store(autoAcceptFollowsVal)
 
 	// ─── RSA Key Pair (auto-generated if missing) ─────────────────────────────
 	keyPair, err := ap.LoadOrGenerateKeyPair(cfg.RSAPrivateKeyPath, cfg.RSAPublicKeyPath)
@@ -264,11 +270,13 @@ func main() {
 		Publisher:      publisher,
 		Store:          store,
 		Federator:      federator,
-		NostrRelay:     cfg.PrimaryRelay(),
-		ShowSourceLink: showSourceLink,
+		NostrRelay:        cfg.PrimaryRelay(),
+		ShowSourceLink:    showSourceLink,
+		AutoAcceptFollows: autoAcceptFollowsBool,
 	}
 
 	// ─── Nostr Handler (incoming Nostr → ActivityPub) ─────────────────────────
+	// RelayUpdater is assigned below, after pool is created (they are mutually dependent).
 	nostrHandler := &nostrpkg.Handler{
 		TC:        tc,
 		Federator: federator,
@@ -329,6 +337,11 @@ func main() {
 	pool := nostrpkg.NewRelayPool(cfg.NostrRelays, cfg.NostrRelays, cfg.NostrPublicKey, nostrHandler.Handle)
 	go pool.Start(ctx)
 
+	// Wire relay manager now that pool exists. Shared between nostrHandler (kind-10002
+	// inbound relay list sync) and the HTTP server (admin UI relay management).
+	relayMgr := &relayManagerAdapter{publisher: publisher, pool: pool, store: store}
+	nostrHandler.RelayUpdater = relayMgr
+
 	// ─── Start HTTP server ────────────────────────────────────────────────────
 	srv := server.New(cfg, store, keyPair, apHandler, store, signer)
 	if logBroadcaster != nil {
@@ -342,8 +355,9 @@ func main() {
 	}
 	srv.SetResyncTrigger(resyncTrigger)
 	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})
-	srv.SetRelayManager(&relayManagerAdapter{publisher: publisher, pool: pool, store: store})
+	srv.SetRelayManager(relayMgr)
 	srv.SetShowSourceLink(showSourceLink)
+	srv.SetAutoAcceptFollows(autoAcceptFollowsBool)
 	srv.Start(ctx) // blocks until ctx is cancelled
 
 	slog.Info("klistr bridge stopped")

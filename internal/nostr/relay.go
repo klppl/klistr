@@ -216,7 +216,7 @@ func (rp *RelayPool) Start(ctx context.Context) {
 		slog.Info("starting relay firehose", "relays", relays, "author", rp.authorPubKey[:8])
 
 		filters := nostr.Filters{{
-			Kinds:   []int{0, 1, 3, 5, 6, 7, 9735},
+			Kinds:   []int{0, 1, 3, 5, 6, 7, 1068, 9735, 10002, 30023},
 			Authors: []string{rp.authorPubKey},
 			Since:   &since,
 			Limit:   0,

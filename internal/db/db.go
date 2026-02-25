@@ -430,6 +430,42 @@ func scanStringRows(rows *sql.Rows) ([]string, error) {
 	return result, rows.Err()
 }
 
+// GetLocalObjectCount returns the number of locally-originated AP objects
+// (i.e. ap_id values that begin with the given URL prefix).
+func (s *Store) GetLocalObjectCount(prefix string) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM objects WHERE ap_id LIKE `+s.ph(),
+		prefix+"%",
+	).Scan(&n)
+	return n, err
+}
+
+// GetRecentLocalObjects returns up to limit ap_id values whose ap_id starts with
+// prefix. The order is unspecified but consistent within a single DB instance.
+func (s *Store) GetRecentLocalObjects(prefix string, limit int) ([]string, error) {
+	var q string
+	if s.driver == "sqlite" {
+		q = `SELECT ap_id FROM objects WHERE ap_id LIKE ? ORDER BY rowid DESC LIMIT ?`
+	} else {
+		q = `SELECT ap_id FROM objects WHERE ap_id LIKE $1 ORDER BY ap_id DESC LIMIT $2`
+	}
+	rows, err := s.db.Query(q, prefix+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
 // ph returns the SQL placeholder token for a single-argument query.
 // SQLite uses ? and PostgreSQL uses $1.
 func (s *Store) ph() string {

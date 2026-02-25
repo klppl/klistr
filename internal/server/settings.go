@@ -12,33 +12,36 @@ import (
 
 // KV keys used to persist admin settings across restarts.
 const (
-	kvShowSourceLink  = "setting_show_source_link"
-	kvDisplayName     = "setting_display_name"
-	kvSummary         = "setting_summary"
-	kvPicture         = "setting_picture"
-	kvBanner          = "setting_banner"
-	kvExternalBaseURL = "setting_external_base_url"
-	kvZapPubkey       = "setting_zap_pubkey"
-	kvZapSplit        = "setting_zap_split"
+	kvShowSourceLink    = "setting_show_source_link"
+	kvAutoAcceptFollows = "setting_auto_accept_follows"
+	kvDisplayName       = "setting_display_name"
+	kvSummary           = "setting_summary"
+	kvPicture           = "setting_picture"
+	kvBanner            = "setting_banner"
+	kvExternalBaseURL   = "setting_external_base_url"
+	kvZapPubkey         = "setting_zap_pubkey"
+	kvZapSplit          = "setting_zap_split"
 )
 
 type settingsResponse struct {
-	ShowSourceLink  bool    `json:"show_source_link"`
-	DisplayName     string  `json:"display_name"`
-	Summary         string  `json:"summary"`
-	Picture         string  `json:"picture"`
-	Banner          string  `json:"banner"`
-	ExternalBaseURL string  `json:"external_base_url"`
-	ZapPubkey       string  `json:"zap_pubkey"`
-	ZapSplit        float64 `json:"zap_split"`
+	ShowSourceLink    bool    `json:"show_source_link"`
+	AutoAcceptFollows bool    `json:"auto_accept_follows"`
+	DisplayName       string  `json:"display_name"`
+	Summary           string  `json:"summary"`
+	Picture           string  `json:"picture"`
+	Banner            string  `json:"banner"`
+	ExternalBaseURL   string  `json:"external_base_url"`
+	ZapPubkey         string  `json:"zap_pubkey"`
+	ZapSplit          float64 `json:"zap_split"`
 }
 
 // handleGetSettings returns all user-configurable settings.
 // GET /web/api/settings
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, settingsResponse{
-		ShowSourceLink:  s.showSourceLink.Load(),
-		DisplayName:     s.cfg.NostrDisplayName,
+		ShowSourceLink:    s.showSourceLink.Load(),
+		AutoAcceptFollows: s.autoAcceptFollows.Load(),
+		DisplayName:       s.cfg.NostrDisplayName,
 		Summary:         s.cfg.NostrSummary,
 		Picture:         s.cfg.NostrPicture,
 		Banner:          s.cfg.NostrBanner,
@@ -52,8 +55,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // PATCH /web/api/settings
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ShowSourceLink  *bool    `json:"show_source_link"`
-		DisplayName     *string  `json:"display_name"`
+		ShowSourceLink    *bool    `json:"show_source_link"`
+		AutoAcceptFollows *bool    `json:"auto_accept_follows"`
+		DisplayName       *string  `json:"display_name"`
 		Summary         *string  `json:"summary"`
 		Picture         *string  `json:"picture"`
 		Banner          *string  `json:"banner"`
@@ -75,6 +79,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("settings: failed to persist show_source_link", "error", err)
 		}
 		slog.Info("settings: show_source_link updated", "value", *req.ShowSourceLink)
+	}
+
+	if req.AutoAcceptFollows != nil {
+		s.autoAcceptFollows.Store(*req.AutoAcceptFollows)
+		if err := s.store.SetKV(kvAutoAcceptFollows, strconv.FormatBool(*req.AutoAcceptFollows)); err != nil {
+			slog.Warn("settings: failed to persist auto_accept_follows", "error", err)
+		}
+		slog.Info("settings: auto_accept_follows updated", "value", *req.AutoAcceptFollows)
 	}
 
 	if req.DisplayName != nil {

@@ -3,6 +3,7 @@ package nostr
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/klppl/klistr/internal/ap"
@@ -23,6 +24,15 @@ type BskyPoster interface {
 	Handle(ctx context.Context, event *nostr.Event)
 }
 
+// RelayUpdater is the subset of the relay manager used by the kind-10002 handler.
+// The relayManagerAdapter in cmd/klistr/main.go satisfies this interface and
+// persists changes to the KV store so they survive restarts.
+type RelayUpdater interface {
+	AddRelay(url string) bool
+	RemoveRelay(url string) bool
+	Relays() []string
+}
+
 // Handler processes incoming Nostr events from the relay subscription
 // and federates them to ActivityPub servers.
 type Handler struct {
@@ -32,6 +42,8 @@ type Handler struct {
 	Store FollowStore
 	// BskyPoster mirrors events to Bluesky when non-nil.
 	BskyPoster BskyPoster
+	// RelayUpdater syncs the relay list when a kind-10002 event is received (optional).
+	RelayUpdater RelayUpdater
 }
 
 // Handle processes a single Nostr event.
@@ -67,6 +79,12 @@ func (h *Handler) Handle(ctx context.Context, event *nostr.Event) {
 		h.handleKind7(ctx, event)
 	case 9735:
 		h.handleKind9735(ctx, event)
+	case 10002:
+		h.handleKind10002(event)
+	case 1068:
+		h.handleKind1068(ctx, event)
+	case 30023:
+		h.handleKind30023(ctx, event)
 	}
 
 	// Mirror to Bluesky if bridge is configured.
@@ -129,9 +147,77 @@ func (h *Handler) handleKind7(ctx context.Context, event *nostr.Event) {
 }
 
 func (h *Handler) handleKind9735(ctx context.Context, event *nostr.Event) {
-	// Zaps: currently logged but not fully federated.
-	slog.Debug("received zap event", "id", event.ID)
-	// TODO: Federate zap as AP Note/Announce
+	activity := ap.ToZap(event, h.TC)
+	if activity != nil {
+		h.Federator.Federate(ctx, activity)
+	}
+}
+
+// handleKind10002 processes a NIP-65 relay list event and reconciles the
+// running relay configuration to match.  Relays present in the event but
+// absent from the current list are added; relays no longer listed are removed.
+// Each change is persisted via RelayUpdater so it survives restarts.
+func (h *Handler) handleKind10002(event *nostr.Event) {
+	if h.RelayUpdater == nil {
+		return
+	}
+
+	// Parse all "r" tags — tag format is ["r", "wss://...", optional "read"/"write"].
+	// We use a unified relay list (no separate read/write split), so all URLs are included.
+	desired := make(map[string]struct{})
+	for _, tag := range event.Tags {
+		if len(tag) < 2 || tag[0] != "r" {
+			continue
+		}
+		url := tag[1]
+		if url == "" || (!strings.HasPrefix(url, "wss://") && !strings.HasPrefix(url, "ws://")) {
+			continue
+		}
+		desired[url] = struct{}{}
+	}
+
+	if len(desired) == 0 {
+		slog.Debug("kind10002: empty relay list, ignoring")
+		return
+	}
+
+	// Build a set of currently configured relays.
+	current := make(map[string]struct{})
+	for _, r := range h.RelayUpdater.Relays() {
+		current[r] = struct{}{}
+	}
+
+	// Add new relays.
+	for url := range desired {
+		if _, exists := current[url]; !exists {
+			if h.RelayUpdater.AddRelay(url) {
+				slog.Info("kind10002: relay added from relay list event", "relay", url)
+			}
+		}
+	}
+
+	// Remove relays no longer in the list.
+	for url := range current {
+		if _, keep := desired[url]; !keep {
+			if h.RelayUpdater.RemoveRelay(url) {
+				slog.Info("kind10002: relay removed (not in relay list event)", "relay", url)
+			}
+		}
+	}
+}
+
+func (h *Handler) handleKind1068(ctx context.Context, event *nostr.Event) {
+	question := ap.ToQuestion(event, h.TC)
+	if question != nil {
+		h.Federator.Federate(ctx, ap.BuildCreate(question, h.TC.LocalDomain))
+	}
+}
+
+func (h *Handler) handleKind30023(ctx context.Context, event *nostr.Event) {
+	article := ap.ToArticle(event, h.TC)
+	if article != nil {
+		h.Federator.Federate(ctx, ap.BuildCreate(article, h.TC.LocalDomain))
+	}
 }
 
 func (h *Handler) handleKind3(ctx context.Context, event *nostr.Event) {

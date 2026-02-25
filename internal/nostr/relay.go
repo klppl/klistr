@@ -474,6 +474,12 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 				cb.openForPoW()
 				slog.Warn("relay requires proof-of-work (NIP-13); disabling until manually reset — consider removing this relay",
 					"relay", result.RelayURL, "error", result.Error)
+			} else if isPolicyRejection(result.Error) {
+				// Relay is healthy but rejected the event content via NIP-01.
+				// Record success to keep circuit closed (preventing IP bans is not needed).
+				cb.recordSuccess()
+				slog.Debug("relay rejected event by policy", "relay", result.RelayURL, "id", event.ID, "error", result.Error)
+				failed++ // Count as publish failure for this specific event
 			} else {
 				justOpened := cb.recordFailure()
 				if justOpened {
@@ -508,4 +514,14 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 // proof-of-work requirement (NIP-13). The relay error message contains "pow:".
 func isPowRequired(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "pow:")
+}
+
+// isPolicyRejection returns true if the relay rejected the event with a NIP-01
+// machine-readable prefix indicating a static policy refusal.
+func isPolicyRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "msg: blocked:") || strings.Contains(msg, "msg: invalid:")
 }

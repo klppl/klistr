@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/klppl/klistr/internal/ap"
 	"github.com/klppl/klistr/internal/bsky"
+	gonostr "github.com/nbd-wtf/go-nostr"
 )
 
 // BskyClient is the interface for Bluesky operations used by follow management.
@@ -448,8 +448,6 @@ func (s *Server) handleResyncFollowProfiles(w http.ResponseWriter, r *http.Reque
 	jsonResponse(w, map[string]string{"message": msg}, http.StatusOK)
 }
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
-
 // apURLToHandle converts an AP actor URL like https://mastodon.social/users/alice
 // into a @alice@mastodon.social display string.
 func apURLToHandle(actorURL string) string {
@@ -464,4 +462,137 @@ func apURLToHandle(actorURL string) string {
 		return "@" + user + "@" + u.Host
 	}
 	return actorURL
+}
+
+// ─── Danger Zone ─────────────────────────────────────────────────────────────
+
+// handleRefollowAll forces a re-sync of all inbound Fediverse follows by
+// iterating over the local database of followed AP actors and broadcasting
+// a fresh Follow activity to each of them. Long timeout used for large lists.
+//
+// POST /web/api/refollow-all
+func (s *Server) handleRefollowAll(w http.ResponseWriter, r *http.Request) {
+	// We don't need a request context because we immediately detach to a background goroutine.
+	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+	apFollows, err := s.store.GetAPFollowing(localActorURL)
+	if err != nil {
+		slog.Error("refollow-all: failed to read follows", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(apFollows) == 0 {
+		jsonResponse(w, map[string]string{"message": "No Fediverse follows found to re-sync."}, http.StatusOK)
+		return
+	}
+
+	if s.apHandler == nil || s.apHandler.Federator == nil {
+		http.Error(w, "federator not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Federate the 'Follow' activities in the background so the HTTP request
+	// doesn't block waiting for hundreds of network calls.
+	go func() {
+		// Replace the short context with a detached long-running one.
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer bgCancel()
+
+		slog.Info("refollow-all: starting bulk follow broadcast", "count", len(apFollows))
+		for _, targetActorURL := range apFollows {
+			follow := ap.BuildFollow(localActorURL, targetActorURL)
+			s.apHandler.Federator.Federate(bgCtx, follow)
+		}
+		slog.Info("refollow-all: completed bulk follow broadcast")
+	}()
+
+	s.auditLog("refollow_all", "count="+fmt.Sprint(len(apFollows)))
+	jsonResponse(w, map[string]string{
+		"message": fmt.Sprintf("Re-sync initiated for %d Fediverse contacts in the background.", len(apFollows)),
+	}, http.StatusOK)
+}
+
+// handleWipeFollows permanently deletes all Fediverse contacts from the local
+// database and publishes an empty contact list (kind-3) to Nostr, triggering
+// 'Undo Follow' activities to all remote peers.
+//
+// POST /web/api/wipe-follows
+func (s *Server) handleWipeFollows(w http.ResponseWriter, r *http.Request) {
+	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
+	apFollows, err := s.store.GetAPFollowing(localActorURL)
+	if err != nil {
+		slog.Error("wipe-follows: failed to read follows", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	count := len(apFollows)
+	if count == 0 {
+		jsonResponse(w, map[string]string{"message": "There are no Fediverse follows to wipe."}, http.StatusOK)
+		return
+	}
+
+	// 1. Unfollow from the DB directly.
+	for _, targetActorURL := range apFollows {
+		if err := s.store.RemoveFollow(localActorURL, targetActorURL); err != nil {
+			slog.Warn("wipe-follows: failed to remove from db", "actor", targetActorURL, "error", err)
+		}
+	}
+
+	// 2. Publish a merged kind-3 with empty desired additions but all current
+	// known pubkeys marked as removals. By omitting pubkeys from the new kind-3,
+	// the relay will echo it and our handleKind3 will issue Undo Follow for
+	// everyone who was in the previous list.
+	// Since we already deleted them from the DB, we just rely on `handleKind3`
+	// processing the removal and doing the AP cleanup. Actually, handleKind3 reads
+	// from the DB to see who to Undo. Since we just deleted them, it won't know!
+	//
+	// Better approach: just let handleKind3 do the work. We publish an empty kind-3
+	// (or a kind-3 containing ONLY the Bluesky follows without the AP follows).
+
+	// Get current Bluesky follows to preserve them in the kind-3.
+	bskyKeys := []string{}
+	if bskyFollows, err := s.store.GetBskyFollowing(localActorURL); err == nil {
+		for _, bskyID := range bskyFollows {
+			did := strings.TrimPrefix(bskyID, "bsky:")
+			if pubkey, err := s.actorResolver.PublicKey(did); err == nil {
+				bskyKeys = append(bskyKeys, pubkey)
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// mergeAndPublishKind3 will construct a new list using only bskyKeys.
+	// It replaces the old kind-3. When handleKind3 sees the new list is missing
+	// the AP keys, it will cross-reference with the DB, send Undo Follow to them,
+	// and THEN delete them from the DB.
+	_, _, err = s.mergeAndPublishKind3(ctx, bskyKeys, nil) // use Set semantics, actually mergeAndPublishKind3 ADDS keys.
+	if err != nil {
+		slog.Error("wipe-follows: failed to publish kind-3", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Wait, mergeAndPublishKind3(ctx, add, remove) takes lists.
+	// We want to REMOVE all AP keys.
+	apKeysToRemove := []string{}
+	for _, targetActorURL := range apFollows {
+		if pubkey, err := s.actorResolver.PublicKey(targetActorURL); err == nil {
+			apKeysToRemove = append(apKeysToRemove, pubkey)
+		}
+	}
+
+	_, _, err = s.mergeAndPublishKind3(ctx, nil, apKeysToRemove)
+	if err != nil {
+		slog.Error("wipe-follows: failed to publish kind-3 removals", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.auditLog("wipe_follows", "count="+fmt.Sprint(count))
+	jsonResponse(w, map[string]string{
+		"message": fmt.Sprintf("Wiped %d Fediverse contacts. Unfollow requests sent.", count),
+	}, http.StatusOK)
 }

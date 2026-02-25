@@ -158,27 +158,27 @@ func (l *inboxLimiter) release(origin string) {
 
 // Server is the main HTTP server for klistr.
 type Server struct {
-	cfg           *config.Config
-	store         *db.Store
-	keyPair       *ap.KeyPair
-	apHandler     *ap.APHandler
-	router        *chi.Mux
-	actorKeyStore ActorKeyStore
-	actorResolver ActorResolver
-	startedAt        time.Time
-	inboxSem         chan struct{}    // global concurrency cap for inbox processing
-	inboxLimiter     *inboxLimiter   // per-origin concurrency cap
-	inboxIPLimiter   *ipRateLimiter  // per-remote-IP token-bucket rate limiter
+	cfg            *config.Config
+	store          *db.Store
+	keyPair        *ap.KeyPair
+	apHandler      *ap.APHandler
+	router         *chi.Mux
+	actorKeyStore  ActorKeyStore
+	actorResolver  ActorResolver
+	startedAt      time.Time
+	inboxSem       chan struct{}  // global concurrency cap for inbox processing
+	inboxLimiter   *inboxLimiter  // per-origin concurrency cap
+	inboxIPLimiter *ipRateLimiter // per-remote-IP token-bucket rate limiter
 
 	// Optional — set before Start() is called.
-	logBroadcaster  *LogBroadcaster
-	bskyTrigger     chan struct{}
-	resyncTrigger   chan struct{}
-	followPublisher FollowPublisher
-	bskyClient      BskyClient
-	relayManager    RelayManager
-	showSourceLink      *atomic.Bool
-	autoAcceptFollows   *atomic.Bool
+	logBroadcaster    *LogBroadcaster
+	bskyTrigger       chan struct{}
+	resyncTrigger     chan struct{}
+	followPublisher   FollowPublisher
+	bskyClient        BskyClient
+	relayManager      RelayManager
+	showSourceLink    *atomic.Bool
+	autoAcceptFollows *atomic.Bool
 
 	// nip05Cache caches NIP-05 remote handle lookups (lowercase name → pubkey).
 	// Eliminates repeated WebFinger calls for the same handle across concurrent
@@ -198,19 +198,19 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 		panic("crypto/rand failed: " + err.Error())
 	}
 	s := &Server{
-		cfg:            cfg,
-		store:          store,
-		keyPair:        keyPair,
-		apHandler:      apHandler,
-		actorKeyStore:  actorKeyStore,
-		actorResolver:  actorResolver,
-		startedAt:      time.Now(),
-		inboxSem:         make(chan struct{}, maxConcurrentActivities),
-		inboxLimiter:     newInboxLimiter(),
-		inboxIPLimiter:   newIPRateLimiter(),
+		cfg:               cfg,
+		store:             store,
+		keyPair:           keyPair,
+		apHandler:         apHandler,
+		actorKeyStore:     actorKeyStore,
+		actorResolver:     actorResolver,
+		startedAt:         time.Now(),
+		inboxSem:          make(chan struct{}, maxConcurrentActivities),
+		inboxLimiter:      newInboxLimiter(),
+		inboxIPLimiter:    newIPRateLimiter(),
 		showSourceLink:    &atomic.Bool{},
 		autoAcceptFollows: func() *atomic.Bool { b := &atomic.Bool{}; b.Store(true); return b }(),
-		csrfToken:      hex.EncodeToString(tokenBytes),
+		csrfToken:         hex.EncodeToString(tokenBytes),
 	}
 	s.router = s.buildRouter()
 	return s
@@ -345,6 +345,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Patch("/api/settings", s.handleUpdateSettings)
 			r.Post("/api/republish-kind0", s.handleRepublishKind0)
 			r.Post("/api/republish-kind3", s.handleRepublishKind3)
+			r.Post("/api/refollow-all", s.handleRefollowAll)
+			r.Post("/api/wipe-follows", s.handleWipeFollows)
 			r.Get("/api/audit-log", s.handleGetAuditLog)
 		})
 	}
@@ -488,11 +490,11 @@ func (s *Server) handleOutbox(w http.ResponseWriter, r *http.Request) {
 		items := make([]interface{}, 0, len(ids))
 		for _, apID := range ids {
 			items = append(items, map[string]interface{}{
-				"type":  "Create",
-				"id":    apID + "#create",
-				"actor": localActorURL,
+				"type":   "Create",
+				"id":     apID + "#create",
+				"actor":  localActorURL,
 				"object": apID,
-				"to":   []string{ap.PublicURI},
+				"to":     []string{ap.PublicURI},
 			})
 		}
 

@@ -612,9 +612,34 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     </div>
 
   </div>
+  </div>
   <div style="display:flex;align-items:center;gap:12px;margin-top:16px">
     <button class="btn btn-blue" id="btn-save-settings" onclick="saveSettings()">Save Settings</button>
     <span id="settings-msg" class="action-msg"></span>
+  </div>
+</div>
+
+<!-- Row 7: Danger Zone -->
+<div class="card-full" style="border: 1px solid var(--red); background: rgba(220, 38, 38, 0.05)">
+  <h2 style="color: var(--red)">Danger Zone</h2>
+  <div class="field" style="margin-bottom: 20px;">
+    <p style="color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; max-width: 600px;">
+      <b>Force Fediverse Re-sync:</b> If inbound federation suddenly stopped (emails from remote instances stopped arriving), remote servers may have dropped you from their delivery queues (often due to key/domain changes).
+      <br><br>
+      This will broadcast a fresh ActivityPub <code>Follow</code> activity to every existing Fediverse contact, forcing remote servers to re-evaluate your keys and restore your inbound feed, without losing your contacts.
+    </p>
+    <button class="btn rbtn-blue" id="btn-force-refollow" onclick="forceRefollowAll()">Force Fediverse Re-sync</button>
+    <span id="force-refollow-msg" class="action-msg" style="margin-left: 12px"></span>
+  </div>
+  
+  <div class="field">
+    <p style="color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; max-width: 600px;">
+      <b>Wipe Fediverse Follows:</b> This will permanently delete your entire Fediverse following list from the database, publish an empty kind-3 contact list to Nostr, and broadcast an <code>Undo Follow</code> to all remote servers.
+      <br><br>
+      Only do this if you want a complete, destructive hard reset of your Fediverse connections.
+    </p>
+    <button class="btn rbtn-red" id="btn-wipe-follows" style="background:var(--red);color:#fff" onclick="wipeFediverseFollows()">Wipe Fediverse Follows (Irreversible)</button>
+    <span id="wipe-follows-msg" class="action-msg" style="margin-left: 12px"></span>
   </div>
 </div>
 
@@ -1422,6 +1447,68 @@ async function saveSettings() {
     } else {
       const text = await r.text();
       msg.textContent = 'Error: ' + text;
+      msg.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    msg.textContent = 'Error: ' + e.message;
+    msg.style.color = 'var(--red)';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHTML;
+  }
+}
+
+// ── Danger Zone ─────────────────────────────────────────────────────────────
+async function forceRefollowAll() {
+  if (!confirm('Broadcast new Follow activities to all existing Fediverse contacts? This can take several minutes to run in the background.')) return;
+  const btn = document.getElementById('btn-force-refollow');
+  const msg = document.getElementById('force-refollow-msg');
+  btn.disabled = true;
+  const origHTML = btn.innerHTML;
+  btn.textContent = 'Initiating…';
+  msg.textContent = '';
+  msg.style.color = '';
+  try {
+    const r = await apiFetch('/web/api/refollow-all', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      msg.textContent = d.message || 'Started.';
+      msg.style.color = 'var(--green)';
+      toast(d.message || 'Bulk Re-sync initiated.');
+    } else {
+      msg.textContent = 'Error: ' + (d.error || d.message || r.statusText);
+      msg.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    msg.textContent = 'Error: ' + e.message;
+    msg.style.color = 'var(--red)';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHTML;
+  }
+}
+
+async function wipeFediverseFollows() {
+  if (!confirm('DANGER: This will permanently delete your entire Fediverse following list and send Undo Follows to remote servers. This CANNOT be undone. Are you absolutely sure?')) return;
+  if (!confirm('Final confirmation: Completely WIPE all Fediverse contacts?')) return;
+  
+  const btn = document.getElementById('btn-wipe-follows');
+  const msg = document.getElementById('wipe-follows-msg');
+  btn.disabled = true;
+  const origHTML = btn.innerHTML;
+  btn.textContent = 'Wiping…';
+  msg.textContent = '';
+  msg.style.color = '';
+  try {
+    const r = await apiFetch('/web/api/wipe-follows', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      msg.textContent = d.message || 'Wiped.';
+      msg.style.color = 'var(--green)';
+      toast(d.message || 'Fediverse contacts wiped.');
+      loadFollowing(); // Refresh the list
+    } else {
+      msg.textContent = 'Error: ' + (d.error || d.message || r.statusText);
       msg.style.color = 'var(--red)';
     }
   } catch(e) {

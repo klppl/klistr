@@ -375,6 +375,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
         <div class="bp-row"><span class="bpl">Followers</span><span class="bpv big" id="bp-ap-followers">—</span></div>
         <div class="bp-row"><span class="bpl">Known actors</span><span class="bpv" id="bp-ap-actors">—</span></div>
         <div class="bp-row"><span class="bpl">Objects</span><span class="bpv" id="bp-ap-objects">—</span></div>
+        <div class="bp-row"><span class="bpl" title="Fediverse uses a push inbox — no polling required">Last poll</span><span class="bpv sm">—</span></div>
         <div class="bp-row"><span class="bpl">Last resync</span><span class="bpv sm" id="bp-last-resync">—</span></div>
       </div>
     </div>
@@ -804,11 +805,10 @@ async function loadStats() {
   const bskyBody = document.getElementById('bp-bsky-body');
   if (d.bsky_enabled) {
     bskyBody.innerHTML =
-      '<div class="bp-row"><span class="bpl">Status</span><span class="bpv"><span class="badge badge-green">active</span></span></div>'+
       '<div class="bp-row"><span class="bpl">Followers</span><span class="bpv big">'+esc(String(d.bsky_followers??'—'))+'</span></div>'+
       '<div class="bp-row"><span class="bpl">Objects</span><span class="bpv">'+esc(String(d.bsky_objects??'—'))+'</span></div>'+
       '<div class="bp-row"><span class="bpl">Last poll</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_poll))+'</span></div>'+
-      '<div class="bp-row"><span class="bpl">Last notification</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_seen))+'</span></div>';
+      '<div class="bp-row"><span class="bpl">Last resync</span><span class="bpv sm">'+esc(relativeTime(d.bsky_last_seen))+'</span></div>';
   }
 
   // Total panel

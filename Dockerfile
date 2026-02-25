@@ -1,7 +1,7 @@
 # ─── Build stage ──────────────────────────────────────────────────────────────
 # $BUILDPLATFORM is always the runner's native platform (amd64).
 # Go cross-compiles to $TARGETARCH, so no QEMU emulation is needed.
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

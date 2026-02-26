@@ -172,9 +172,13 @@ func (c *Client) ListNotifications(ctx context.Context, cursor string) (*ListNot
 
 // GetTimeline fetches the home timeline (posts from followed accounts) via
 // app.bsky.feed.getTimeline. Returns at most 50 items, newest first.
-func (c *Client) GetTimeline(ctx context.Context) (*GetTimelineResponse, error) {
+// Pass an empty cursor to start from the beginning.
+func (c *Client) GetTimeline(ctx context.Context, cursor string) (*GetTimelineResponse, error) {
 	params := url.Values{}
 	params.Set("limit", "50")
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
 	var resp GetTimelineResponse
 	if err := c.authedGet(ctx, "app.bsky.feed.getTimeline", params, &resp); err != nil {
 		return nil, fmt.Errorf("bsky getTimeline: %w", err)
@@ -359,7 +363,9 @@ func (c *Client) doPost(ctx context.Context, method string, body interface{}, ou
 
 // updateRateLimit records the RateLimit-Remaining / RateLimit-Reset headers
 // from any successful response and warns when headroom is critically low.
-func (c *Client) updateRateLimit(resp *http.Response) {
+// method is the XRPC method name (e.g. "app.bsky.notification.listNotifications")
+// included in the warning so operators know which endpoint is running out.
+func (c *Client) updateRateLimit(resp *http.Response, method string) {
 	s := resp.Header.Get("RateLimit-Remaining")
 	if s == "" {
 		return
@@ -380,6 +386,7 @@ func (c *Client) updateRateLimit(resp *http.Response) {
 	c.mu.Unlock()
 	if n <= rateLimitWarnThreshold {
 		slog.Warn("bsky rate limit headroom low",
+			"method", method,
 			"remaining", n,
 			"reset_in", time.Until(reset).Round(time.Second),
 		)
@@ -399,7 +406,9 @@ func (c *Client) doRequest(req *http.Request, out interface{}) error {
 	}
 
 	// Track rate-limit headroom on every response (header absent on error codes too).
-	c.updateRateLimit(resp)
+	// Extract the XRPC method name from the path (/xrpc/<method>) for the warning log.
+	xrpcMethod := strings.TrimPrefix(req.URL.Path, "/xrpc/")
+	c.updateRateLimit(resp, xrpcMethod)
 
 	if resp.StatusCode == 401 {
 		return errAuthExpired

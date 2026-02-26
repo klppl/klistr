@@ -595,9 +595,13 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 			if rootEventID == "" {
 				rootEventID = replyToEventID
 			}
+		} else {
+			// Parent is unresolvable even after the pre-fetch in handleCreate.
+			// Drop the reply rather than publishing it without thread context,
+			// which would make it appear as a top-level post in the main feed.
+			slog.Debug("dropping reply: parent not resolvable", "inReplyTo", note.InReplyTo, "note", note.ID)
+			return nil, nil
 		}
-		// If parent is unresolvable, publish without any reply tag so the post
-		// is not silently dropped — the content is still preserved.
 	}
 
 	// Resolve quote reference.

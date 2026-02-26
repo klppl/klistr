@@ -120,38 +120,64 @@ func (p *Poller) poll(ctx context.Context) {
 	p.pollSeenDIDs = nil // release for GC between polls
 }
 
+// maxPollPages caps how many pages (of 50) are fetched per poll cycle.
+// This prevents unbounded pagination on first start or after long downtime
+// while still catching up after bursts. 10 pages = 500 items.
+const maxPollPages = 10
+
 // pollNotifications fetches new Bluesky notifications (likes, reposts, replies,
 // mentions, follows) and converts them to Nostr events.
+// It paginates until all new notifications since lastSeen are collected,
+// so no items are dropped when more than 50 arrive between polls.
 func (p *Poller) pollNotifications(ctx context.Context) {
-	// Always fetch from the top (newest first); we filter by indexedAt ourselves.
-	// The API cursor is for backwards pagination, not forward polling.
-	resp, err := p.Client.ListNotifications(ctx, "")
-	if err != nil {
-		slog.Warn("bsky poller: list notifications failed", "error", err)
-		return
-	}
-
-	// Record that the poll completed successfully, regardless of new notifications.
-	_ = p.Store.SetKV(kvLastPollKey, time.Now().UTC().Format(time.RFC3339))
-
-	if len(resp.Notifications) == 0 {
-		return
-	}
-
 	lastSeen, _ := p.Store.GetKV(kvLastSeenKey)
 
-	// Process oldest-first (API returns newest-first, so reverse).
-	notifs := make([]Notification, len(resp.Notifications))
-	copy(notifs, resp.Notifications)
-	slices.Reverse(notifs)
+	// Collect all new notifications across pages (API returns newest-first).
+	var allNew []Notification
+	cursor := ""
+	for page := 0; page < maxPollPages; page++ {
+		resp, err := p.Client.ListNotifications(ctx, cursor)
+		if err != nil {
+			slog.Warn("bsky poller: list notifications failed", "error", err)
+			return
+		}
+		if page == 0 {
+			// Record a successful poll on the first page, regardless of results.
+			_ = p.Store.SetKV(kvLastPollKey, time.Now().UTC().Format(time.RFC3339))
+		}
+		if len(resp.Notifications) == 0 {
+			break
+		}
+
+		// Collect items newer than lastSeen; stop paginating when we hit old ones.
+		hitOld := false
+		for _, n := range resp.Notifications {
+			if lastSeen != "" && n.IndexedAt <= lastSeen {
+				hitOld = true
+				break
+			}
+			allNew = append(allNew, n)
+		}
+		if hitOld || resp.Cursor == "" {
+			break
+		}
+		cursor = resp.Cursor
+		if page == maxPollPages-1 {
+			slog.Warn("bsky poller: notification catchup hit page limit, some items may be deferred",
+				"pages", maxPollPages)
+		}
+	}
+
+	if len(allNew) == 0 {
+		return
+	}
+
+	// Process oldest-first (collected newest-first above, so reverse).
+	slices.Reverse(allNew)
 
 	var newest string
-	for i := range notifs {
-		n := &notifs[i]
-		// Skip notifications we have already processed.
-		if lastSeen != "" && n.IndexedAt <= lastSeen {
-			continue
-		}
+	for i := range allNew {
+		n := &allNew[i]
 		p.handleNotification(ctx, n)
 		if n.IndexedAt > newest {
 			newest = n.IndexedAt
@@ -167,29 +193,50 @@ func (p *Poller) pollNotifications(ctx context.Context) {
 
 // pollTimeline fetches posts from followed Bluesky accounts and bridges them
 // to Nostr kind-1 events, mirroring how Fediverse follows work via AP inbox.
+// It paginates until all new posts since lastSeen are collected.
 func (p *Poller) pollTimeline(ctx context.Context) {
-	resp, err := p.Client.GetTimeline(ctx)
-	if err != nil {
-		slog.Warn("bsky poller: get timeline failed", "error", err)
-		return
-	}
-	if len(resp.Feed) == 0 {
-		return
-	}
-
 	lastSeen, _ := p.Store.GetKV(kvTimelineLastSeenKey)
 
-	// Process oldest-first (API returns newest-first, so reverse).
-	items := make([]TimelineFeedPost, len(resp.Feed))
-	copy(items, resp.Feed)
-	slices.Reverse(items)
+	var allNew []TimelineFeedPost
+	cursor := ""
+	for page := 0; page < maxPollPages; page++ {
+		resp, err := p.Client.GetTimeline(ctx, cursor)
+		if err != nil {
+			slog.Warn("bsky poller: get timeline failed", "error", err)
+			return
+		}
+		if len(resp.Feed) == 0 {
+			break
+		}
+
+		hitOld := false
+		for _, item := range resp.Feed {
+			if lastSeen != "" && item.Post.IndexedAt <= lastSeen {
+				hitOld = true
+				break
+			}
+			allNew = append(allNew, item)
+		}
+		if hitOld || resp.Cursor == "" {
+			break
+		}
+		cursor = resp.Cursor
+		if page == maxPollPages-1 {
+			slog.Warn("bsky poller: timeline catchup hit page limit, some items may be deferred",
+				"pages", maxPollPages)
+		}
+	}
+
+	if len(allNew) == 0 {
+		return
+	}
+
+	// Process oldest-first.
+	slices.Reverse(allNew)
 
 	var newest string
-	for i := range items {
-		item := &items[i]
-		if lastSeen != "" && item.Post.IndexedAt <= lastSeen {
-			continue
-		}
+	for i := range allNew {
+		item := &allNew[i]
 		p.bridgeTimelinePost(ctx, item)
 		if item.Post.IndexedAt > newest {
 			newest = item.Post.IndexedAt

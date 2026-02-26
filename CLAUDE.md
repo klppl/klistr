@@ -35,6 +35,9 @@ NOSTR_RELAY=wss://relay1.example.com,wss://relay2.example.com
 # Bluesky bridge (optional — both must be set to enable; restart required to change)
 BSKY_IDENTIFIER=user.bsky.social    # Bluesky handle or DID
 BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx  # Bluesky app password (Settings → App Passwords)
+BSKY_BRIDGE_TIMELINE=false          # Bridge posts from followed Bluesky accounts into Nostr (default: true)
+                                    # Set to false to receive only interactions targeting you (likes, replies, reposts)
+BSKY_PDS_URL=https://bsky.social    # Custom PDS endpoint (default: https://bsky.social; third-party PDS only)
 
 # Web admin UI (optional — omit to disable /web entirely)
 WEB_ADMIN=<password>            # Enables /web admin dashboard; HTTP Basic Auth password
@@ -46,6 +49,13 @@ SIGN_FETCH=true                 # Sign outbound AP requests (default: true)
 ZAP_PUBKEY=<hex>                # Optional Lightning zap split recipient
 ZAP_SPLIT=0.1                   # Zap split percentage (default 10%)
 SHOW_SOURCE_LINK=true           # Append original post URL (🔗) at the bottom of bridged notes (default: false)
+
+# Performance tuning (rarely need changing)
+RESYNC_INTERVAL=24h             # How often AP actor profiles are re-fetched (default: 24h)
+AP_CACHE_TTL=1h                 # TTL for AP object/WebFinger in-memory caches (default: 1h)
+BSKY_POLL_INTERVAL=30s          # How often Bluesky notifications/timeline are polled (default: 30s)
+AP_FEDERATION_CONCURRENCY=10    # Max concurrent outbound AP HTTP delivery requests (default: 10)
+RELAY_CB_THRESHOLD=3            # Relay publish failures before circuit breaker opens (default: 3)
 ```
 
 ## Architecture

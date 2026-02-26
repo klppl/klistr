@@ -218,21 +218,23 @@ Restart klistr. You should see this log line on startup:
 | Kind 6 (repost) | Reposts (if the original was bridged) |
 | Kind 7 `+` (like) | Likes (if the original was bridged) |
 
-| Bluesky → Nostr | How |
-|---|---|
-| Posts from accounts you follow | Kind 1 (signed with a derived key per Bluesky author); threaded if parent is known |
-| Reply to your post | Threaded Kind 1 reply (signed with a derived key for the Bluesky author), or NIP-04 DM if the parent post isn't bridged |
-| Like on your post | Kind 7 reaction |
-| Repost of your post | Kind 6 repost |
-| Mention / quote | NIP-04 DM notification to yourself |
-| New follower | NIP-04 DM notification to yourself |
-| Images (`app.bsky.embed.images`) | NIP-94 `imeta` tags + CDN image URL appended to content |
-| Facet links (anchor text) | URL appended to content if not already visible in text |
-| Link cards (`embed.external`) | URL appended to content if not already visible in text |
+| Bluesky → Nostr | How | Requires |
+|---|---|---|
+| Posts from accounts you follow | Kind 1 (signed with a derived key per Bluesky author); threaded if parent is known | default (disable with `BSKY_BRIDGE_TIMELINE=false`) |
+| Reply to your post | Threaded Kind 1 reply (signed with a derived key for the Bluesky author), or NIP-04 DM if the parent post isn't bridged | default |
+| Like on your post | Kind 7 reaction | default |
+| Repost of your post | Kind 6 repost | default |
+| Mention / quote | NIP-04 DM notification to yourself | default |
+| New follower | NIP-04 DM notification to yourself | default |
+| Images (`app.bsky.embed.images`) | NIP-94 `imeta` tags + CDN image URL appended to content | default |
+| Facet links (anchor text) | URL appended to content if not already visible in text | default |
+| Link cards (`embed.external`) | URL appended to content if not already visible in text | default |
+
+> **Timeline bridging is on by default.** Set `BSKY_BRIDGE_TIMELINE=false` to disable it and receive only interactions *targeting you* (replies, likes, reposts of your posts).
 
 **Notes:**
 - Long Nostr posts (> 300 characters) are truncated and a link to the full post on njump.me is appended.
-- Bluesky is polled every 30 seconds for new notifications and timeline posts.
+- Bluesky is polled every 30 seconds for new notifications and timeline posts. The poller paginates automatically on catch-up after a restart, so no posts are missed.
 - The bridge stores AT URIs in the same database table as ActivityPub IDs, so likes/reposts/deletes and reply threading can be correctly linked.
 - Replying from Nostr to a bridged Bluesky reply will thread correctly back into the Bluesky conversation.
 
@@ -278,11 +280,18 @@ Variables marked **admin UI** can also be changed at runtime from the `/web` das
 | `LOG_LEVEL` | `info` | No | `info` or `debug` |
 | `BSKY_IDENTIFIER` | — | No | Bluesky handle or DID (enables Bluesky bridge) |
 | `BSKY_APP_PASSWORD` | — | No | Bluesky app password (Settings → App Passwords) |
+| `BSKY_BRIDGE_TIMELINE` | `true` | No | Bridge posts from Bluesky accounts you follow into your Nostr feed. Set to `false` to receive only interactions targeting you (replies, likes, reposts). |
+| `BSKY_PDS_URL` | `https://bsky.social` | No | Custom PDS endpoint. Only needed for third-party PDS accounts or did:web identities. |
 | `EXTERNAL_BASE_URL` | `https://njump.me` | No | Base URL for Nostr links (used in truncated Bluesky posts). **Admin UI.** |
 | `ZAP_PUBKEY` | — | No | Hex pubkey for Lightning zap split recipient. **Admin UI.** |
 | `ZAP_SPLIT` | `0.1` | No | Zap split percentage (0–1). **Admin UI.** |
 | `WEB_ADMIN` | — | No | Password for the web admin UI at `/web` (HTTP Basic Auth). Omit to disable entirely. |
 | `SHOW_SOURCE_LINK` | `false` | No | Append the original post URL (`🔗`) at the bottom of bridged notes. **Admin UI** — takes effect immediately for new posts. |
+| `RESYNC_INTERVAL` | `24h` | No | How often bridged AP actor profiles are re-fetched and re-published as kind-0 events. |
+| `AP_CACHE_TTL` | `1h` | No | TTL for the AP object and WebFinger in-memory caches. |
+| `BSKY_POLL_INTERVAL` | `30s` | No | How often the Bluesky notification and timeline poller runs. |
+| `AP_FEDERATION_CONCURRENCY` | `10` | No | Max concurrent outbound ActivityPub HTTP delivery requests. |
+| `RELAY_CB_THRESHOLD` | `3` | No | Consecutive relay publish failures before the circuit breaker opens (opens for 5 min, then auto-retries). |
 
 ---
 

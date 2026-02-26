@@ -63,9 +63,9 @@ type Poller struct {
 	Interval       time.Duration
 	ShowSourceLink *atomic.Bool // append bsky.app post URL at the bottom of bridged notes
 	// BridgeTimeline, when true, enables bridging posts from followed accounts'
-	// home timeline to Nostr kind-1 events. Off by default — only notifications
-	// (likes, reposts, replies, mentions, new followers) are bridged unless this
-	// is explicitly set. Controlled by BSKY_BRIDGE_TIMELINE=true env var.
+	// home timeline to Nostr kind-1 events. On by default — set
+	// BSKY_BRIDGE_TIMELINE=false to disable. When disabled, only notifications
+	// (likes, reposts, replies, mentions, new followers) are bridged.
 	BridgeTimeline bool
 	// TriggerCh, if non-nil, triggers an immediate poll when sent to.
 	TriggerCh <-chan struct{}

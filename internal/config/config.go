@@ -35,7 +35,7 @@ type Config struct {
 	BskyIdentifier    string // BSKY_IDENTIFIER env var (handle or DID)
 	BskyAppPassword   string // BSKY_APP_PASSWORD env var
 	BskyPDSURL        string // BSKY_PDS_URL env var — PDS endpoint (default: https://bsky.social); set for third-party PDS / did:web accounts
-	BskyBridgeTimeline bool  // BSKY_BRIDGE_TIMELINE env var — bridge followed accounts' timeline posts to Nostr (default: false)
+	BskyBridgeTimeline bool  // BSKY_BRIDGE_TIMELINE env var — bridge followed accounts' timeline posts to Nostr (default: true)
 	WebAdminPassword  string // WEB_ADMIN env var — enables /web admin UI when set
 	ShowSourceLink    bool   // SHOW_SOURCE_LINK env var — append original post URL to bridged notes
 
@@ -118,7 +118,7 @@ func Load() *Config {
 		BskyIdentifier:     os.Getenv("BSKY_IDENTIFIER"),
 		BskyAppPassword:    os.Getenv("BSKY_APP_PASSWORD"),
 		BskyPDSURL:         getEnv("BSKY_PDS_URL", "https://bsky.social"),
-		BskyBridgeTimeline: getEnvBool("BSKY_BRIDGE_TIMELINE"),
+		BskyBridgeTimeline: getEnv("BSKY_BRIDGE_TIMELINE", "true") != "false",
 		WebAdminPassword:   os.Getenv("WEB_ADMIN"),
 		ShowSourceLink:    getEnvBool("SHOW_SOURCE_LINK"),
 

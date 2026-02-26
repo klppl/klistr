@@ -322,6 +322,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .ll.WARN{color:var(--yellow)}
 .ll.ERROR{color:var(--red)}
 
+/* Danger zone collapsible */
+details.danger-zone{border:1px solid var(--red);border-radius:10px;background:rgba(220,38,38,0.05);margin-bottom:16px}
+details.danger-zone summary{padding:16px 20px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;color:var(--red);text-transform:uppercase;letter-spacing:.06em;user-select:none}
+details.danger-zone summary::-webkit-details-marker{display:none}
+details.danger-zone summary::before{content:'▶';font-size:8px;transition:transform .2s;flex-shrink:0}
+details.danger-zone[open] summary::before{transform:rotate(90deg)}
+details.danger-zone .danger-body{padding:0 20px 20px;border-top:1px solid rgba(248,81,73,0.2)}
+
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .3s;z-index:999}
 .toast.show{opacity:1;pointer-events:auto}
@@ -619,30 +627,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   </div>
 </div>
 
-<!-- Row 7: Danger Zone -->
-<div class="card-full" style="border: 1px solid var(--red); background: rgba(220, 38, 38, 0.05)">
-  <h2 style="color: var(--red)">Danger Zone</h2>
-  <div class="field" style="margin-bottom: 20px;">
-    <p style="color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; max-width: 600px;">
-      <b>Force Fediverse Re-sync:</b> If inbound federation suddenly stopped (emails from remote instances stopped arriving), remote servers may have dropped you from their delivery queues (often due to key/domain changes).
-      <br><br>
-      This will broadcast a fresh ActivityPub <code>Follow</code> activity to every existing Fediverse contact, forcing remote servers to re-evaluate your keys and restore your inbound feed, without losing your contacts.
-    </p>
-    <button class="btn rbtn-blue" id="btn-force-refollow" onclick="forceRefollowAll()">Force Fediverse Re-sync</button>
-    <span id="force-refollow-msg" class="action-msg" style="margin-left: 12px"></span>
-  </div>
-  
-  <div class="field">
-    <p style="color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; max-width: 600px;">
-      <b>Wipe Fediverse Follows:</b> This will permanently delete your entire Fediverse following list from the database, publish an empty kind-3 contact list to Nostr, and broadcast an <code>Undo Follow</code> to all remote servers.
-      <br><br>
-      Only do this if you want a complete, destructive hard reset of your Fediverse connections.
-    </p>
-    <button class="btn rbtn-red" id="btn-wipe-follows" style="background:var(--red);color:#fff" onclick="wipeFediverseFollows()">Wipe Fediverse Follows (Irreversible)</button>
-    <span id="wipe-follows-msg" class="action-msg" style="margin-left: 12px"></span>
-  </div>
-</div>
-
 <!-- Row 7: Log -->
 <div class="card-full">
   <h2>Log</h2>
@@ -665,6 +649,31 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   </div>
   <div id="log"></div>
 </div>
+
+<!-- Row 8: Danger Zone (collapsed by default) -->
+<details class="danger-zone">
+  <summary>⚠ Danger Zone</summary>
+  <div class="danger-body">
+    <div class="field" style="margin-bottom: 20px; margin-top: 16px;">
+      <p style="color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; max-width: 600px;">
+        <b>Force Fediverse Re-sync:</b> If inbound federation suddenly stopped (emails from remote instances stopped arriving), remote servers may have dropped you from their delivery queues (often due to key/domain changes).
+        <br><br>
+        This will broadcast a fresh ActivityPub <code>Follow</code> activity to every existing Fediverse contact, forcing remote servers to re-evaluate your keys and restore your inbound feed, without losing your contacts.
+      </p>
+      <button class="btn rbtn-blue" id="btn-force-refollow" onclick="forceRefollowAll()">Force Fediverse Re-sync</button>
+      <span id="force-refollow-msg" class="action-msg" style="margin-left: 12px"></span>
+    </div>
+    <div class="field">
+      <p style="color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; max-width: 600px;">
+        <b>Wipe Fediverse Follows:</b> This will permanently delete your entire Fediverse following list from the database, publish an empty kind-3 contact list to Nostr, and broadcast an <code>Undo Follow</code> to all remote servers.
+        <br><br>
+        Only do this if you want a complete, destructive hard reset of your Fediverse connections.
+      </p>
+      <button class="btn rbtn-red" id="btn-wipe-follows" style="background:var(--red);color:#fff" onclick="wipeFediverseFollows()">Wipe Fediverse Follows (Irreversible)</button>
+      <span id="wipe-follows-msg" class="action-msg" style="margin-left: 12px"></span>
+    </div>
+  </div>
+</details>
 
 </div><!-- /layout -->
 <div class="toast" id="toast"></div>

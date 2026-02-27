@@ -297,7 +297,6 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 	// Thread reply posts. If the parent is not yet bridged, fetch and bridge
 	// the full ancestor chain first so we can attach a proper reply tag.
 	var replyToID, rootID string
-	var mentionPubkeys []string
 	if replyBlock, ok := record["reply"].(map[string]interface{}); ok {
 		replyToID, rootID = p.resolveReplyRefs(replyBlock)
 		if replyToID == "" {
@@ -308,9 +307,6 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 					replyToID, rootID = p.resolveReplyRefs(replyBlock)
 				}
 			}
-		}
-		if replyToID != "" {
-			mentionPubkeys = []string{p.LocalPubKey}
 		}
 	}
 
@@ -326,7 +322,6 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 		Images:         extractImagesFromRecord(record, post.Author.DID),
 		ReplyToEventID: replyToID,
 		RootEventID:    rootID,
-		MentionPubkeys: mentionPubkeys,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
 		SourceURL:      atURIToHTTPS(post.URI),
@@ -527,7 +522,6 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		Images:         extractImagesFromRecord(record, n.Author.DID),
 		ReplyToEventID: parentNostrID,
 		RootEventID:    rootNostrID,
-		MentionPubkeys: []string{p.LocalPubKey},
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
 		SourceURL:      atURIToHTTPS(n.URI),

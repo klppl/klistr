@@ -1091,7 +1091,12 @@ async function addFollow(bridge) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({handle, bridge}),
     });
-    const d = await r.json();
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); } catch(_) {
+      msgEl.textContent = 'Error: ' + (text.trim().slice(0, 200) || r.statusText);
+      return;
+    }
     if (r.ok) {
       document.getElementById(inputId).value = '';
       msgEl.textContent = '';
@@ -1114,7 +1119,12 @@ async function removeFollow(handle, bridge) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({handle, bridge}),
     });
-    const d = await r.json();
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); } catch(_) {
+      toast('Error: ' + (text.trim().slice(0, 200) || r.statusText));
+      return;
+    }
     if (r.ok) {
       toast('Unfollowed ' + handle);
       loadFollowing();

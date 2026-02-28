@@ -78,7 +78,7 @@ func (s *Server) handleGetFollowing(w http.ResponseWriter, r *http.Request) {
 // Body: {"handle":"alice@mastodon.social","bridge":"fediverse"} or {"handle":"user.bsky.social","bridge":"bsky"}
 func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 	if s.followPublisher == nil {
-		http.Error(w, "follow publisher not configured", http.StatusServiceUnavailable)
+		jsonResponse(w, map[string]string{"error": "follow publisher not configured"}, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -87,12 +87,12 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 		Bridge string `json:"bridge"` // "fediverse" | "bsky"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		jsonResponse(w, map[string]string{"error": "invalid JSON body"}, http.StatusBadRequest)
 		return
 	}
 	req.Handle = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(req.Handle), "@"))
 	if req.Handle == "" {
-		http.Error(w, "handle required", http.StatusBadRequest)
+		jsonResponse(w, map[string]string{"error": "handle required"}, http.StatusBadRequest)
 		return
 	}
 
@@ -109,7 +109,7 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 
 	case "bsky":
 		if s.bskyClient == nil {
-			http.Error(w, "Bluesky not configured", http.StatusServiceUnavailable)
+			jsonResponse(w, map[string]string{"error": "Bluesky not configured"}, http.StatusServiceUnavailable)
 			return
 		}
 		if err := s.addBskyFollow(ctx, req.Handle, localActorURL); err != nil {
@@ -119,7 +119,7 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 		}
 
 	default:
-		http.Error(w, "bridge must be 'fediverse' or 'bsky'", http.StatusBadRequest)
+		jsonResponse(w, map[string]string{"error": "bridge must be 'fediverse' or 'bsky'"}, http.StatusBadRequest)
 		return
 	}
 
@@ -135,7 +135,7 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 //	{"handle":"user.bsky.social","bridge":"bsky"}
 func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 	if s.followPublisher == nil {
-		http.Error(w, "follow publisher not configured", http.StatusServiceUnavailable)
+		jsonResponse(w, map[string]string{"error": "follow publisher not configured"}, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -144,12 +144,12 @@ func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 		Bridge string `json:"bridge"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		jsonResponse(w, map[string]string{"error": "invalid JSON body"}, http.StatusBadRequest)
 		return
 	}
 	req.Handle = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(req.Handle), "@"))
 	if req.Handle == "" {
-		http.Error(w, "handle required", http.StatusBadRequest)
+		jsonResponse(w, map[string]string{"error": "handle required"}, http.StatusBadRequest)
 		return
 	}
 
@@ -166,7 +166,7 @@ func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 
 	case "bsky":
 		if s.bskyClient == nil {
-			http.Error(w, "Bluesky not configured", http.StatusServiceUnavailable)
+			jsonResponse(w, map[string]string{"error": "Bluesky not configured"}, http.StatusServiceUnavailable)
 			return
 		}
 		if err := s.removeBskyFollow(ctx, req.Handle, localActorURL); err != nil {
@@ -176,7 +176,7 @@ func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 		}
 
 	default:
-		http.Error(w, "bridge must be 'fediverse' or 'bsky'", http.StatusBadRequest)
+		jsonResponse(w, map[string]string{"error": "bridge must be 'fediverse' or 'bsky'"}, http.StatusBadRequest)
 		return
 	}
 

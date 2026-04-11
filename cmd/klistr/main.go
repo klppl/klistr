@@ -298,6 +298,9 @@ func main() {
 		Store:     store,
 	}
 
+	// Wire mute sync interfaces.
+	nostrHandler.MuteStore = store
+
 	// ─── Graceful shutdown ────────────────────────────────────────────────────
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
@@ -335,6 +338,7 @@ func main() {
 				TriggerCh:      bskyTrigger,
 			}
 			go poller.Start(ctx)
+			nostrHandler.BskyMuter = bskyClient
 			slog.Info("bsky bridge enabled", "identifier", cfg.BskyIdentifier)
 		}
 	}

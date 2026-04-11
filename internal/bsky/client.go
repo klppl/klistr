@@ -210,6 +210,24 @@ func (c *Client) FollowActor(ctx context.Context, did string) (string, error) {
 	return parts[len(parts)-1], nil
 }
 
+// MuteActor mutes a Bluesky account via app.bsky.graph.muteActor.
+func (c *Client) MuteActor(ctx context.Context, did string) error {
+	body := map[string]string{"actor": did}
+	if err := c.authedPost(ctx, "app.bsky.graph.muteActor", body, nil); err != nil {
+		return fmt.Errorf("bsky muteActor: %w", err)
+	}
+	return nil
+}
+
+// UnmuteActor unmutes a Bluesky account via app.bsky.graph.unmuteActor.
+func (c *Client) UnmuteActor(ctx context.Context, did string) error {
+	body := map[string]string{"actor": did}
+	if err := c.authedPost(ctx, "app.bsky.graph.unmuteActor", body, nil); err != nil {
+		return fmt.Errorf("bsky unmuteActor: %w", err)
+	}
+	return nil
+}
+
 // GetPostThread fetches the thread view for a post, including up to 10 levels
 // of ancestor posts and no replies (depth=0). Used to bridge missing parent
 // posts when a followed account replies inside a thread.

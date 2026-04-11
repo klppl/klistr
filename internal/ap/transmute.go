@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -651,6 +652,30 @@ func BuildReject(followActivity map[string]interface{}, localActorID string, fol
 		"actor":    localActorID,
 		"object":   followActivity,
 		"to":       []string{followerID},
+	}
+}
+
+// ToBlock creates an AP Block activity targeting the given actor URL.
+func ToBlock(actorURL string, tc *TransmuteContext) map[string]interface{} {
+	id := tc.LocalActorURL + "#block-" + url.PathEscape(actorURL)
+	return map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       id,
+		"type":     "Block",
+		"actor":    tc.LocalActorURL,
+		"object":   actorURL,
+	}
+}
+
+// BuildUndoBlock creates an AP Undo(Block) activity for the given actor URL.
+func BuildUndoBlock(actorURL string, tc *TransmuteContext) map[string]interface{} {
+	blockActivity := ToBlock(actorURL, tc)
+	return map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       tc.LocalActorURL + "#undo-block-" + url.PathEscape(actorURL),
+		"type":     "Undo",
+		"actor":    tc.LocalActorURL,
+		"object":   blockActivity,
 	}
 }
 

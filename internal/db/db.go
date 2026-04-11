@@ -123,6 +123,23 @@ var commonMigrations = []string{
 		detail TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log(ts)`,
+	// Outbox queue for at-least-once delivery across all three protocols.
+	`CREATE TABLE IF NOT EXISTS outbox (
+		id              INTEGER PRIMARY KEY,
+		dest_type       TEXT NOT NULL,
+		dest_url        TEXT NOT NULL,
+		payload         TEXT NOT NULL,
+		priority        INTEGER NOT NULL DEFAULT 1,
+		status          TEXT NOT NULL DEFAULT 'pending',
+		attempts        INTEGER NOT NULL DEFAULT 0,
+		max_attempts    INTEGER NOT NULL DEFAULT 6,
+		next_retry_at   TEXT NOT NULL,
+		last_error      TEXT,
+		created_at      TEXT NOT NULL,
+		completed_at    TEXT,
+		source_event_id TEXT
+	)`,
+	`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`,
 }
 
 func (s *Store) migrateSQLite() error {
@@ -561,6 +578,14 @@ func (s *Store) GetRecentLocalObjects(prefix string, limit int) ([]string, error
 	}
 	return result, rows.Err()
 }
+
+// DB returns the underlying *sql.DB for use by packages that need direct
+// access (e.g. outbox queue). The caller must respect the Store's driver
+// and connection constraints.
+func (s *Store) DB() *sql.DB { return s.db }
+
+// Driver returns "sqlite" or "postgres".
+func (s *Store) Driver() string { return s.driver }
 
 // ph returns the SQL placeholder token for a single-argument query.
 // SQLite uses ? and PostgreSQL uses $1.

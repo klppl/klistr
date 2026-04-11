@@ -330,6 +330,15 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 		ProxyID:        post.URI,
 		ProxyProtocol:  "atproto",
 	}
+
+	// Resolve mention facets → Nostr p-tags via deterministic key derivation.
+	for _, did := range extractMentionDIDs(record) {
+		tmpEvent := &nostr.Event{}
+		if err := p.Signer.Sign(tmpEvent, did); err == nil {
+			np.MentionPubkeys = append(np.MentionPubkeys, tmpEvent.PubKey)
+		}
+	}
+
 	event := bridge.BuildKind1Event(np)
 
 	// Publish a kind-0 for the author so clients can display their profile.
@@ -531,6 +540,15 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		ProxyID:        n.URI,
 		ProxyProtocol:  "atproto",
 	}
+
+	// Resolve mention facets → Nostr p-tags via deterministic key derivation.
+	for _, did := range extractMentionDIDs(record) {
+		tmpEvent := &nostr.Event{}
+		if err := p.Signer.Sign(tmpEvent, did); err == nil {
+			np.MentionPubkeys = append(np.MentionPubkeys, tmpEvent.PubKey)
+		}
+	}
+
 	event := bridge.BuildKind1Event(np)
 
 	// Sign with a derived key for the Bluesky author's DID, giving them a
@@ -672,6 +690,40 @@ func extractContentWarning(record map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+// extractMentionDIDs returns the unique DIDs from mention facets in a Bluesky
+// post record. These are used to add p-tags (mentions) to the bridged Nostr event.
+func extractMentionDIDs(record map[string]interface{}) []string {
+	facets, ok := record["facets"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var dids []string
+	seen := make(map[string]bool)
+	for _, f := range facets {
+		fm, ok := f.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		features, ok := fm["features"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, feat := range features {
+			featMap, ok := feat.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if t, _ := featMap["$type"].(string); t == "app.bsky.richtext.facet#mention" {
+				if did, _ := featMap["did"].(string); did != "" && !seen[did] {
+					dids = append(dids, did)
+					seen[did] = true
+				}
+			}
+		}
+	}
+	return dids
 }
 
 // sendDMNotification delivers a Bluesky interaction as a NIP-04 self-DM.

@@ -324,6 +324,7 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 		RootEventID:    rootID,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
+		ContentWarning: extractContentWarning(record),
 		SourceURL:      atURIToHTTPS(post.URI),
 		ShowSourceLink: p.ShowSourceLink.Load(),
 		ProxyID:        post.URI,
@@ -524,6 +525,7 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		RootEventID:    rootNostrID,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
+		ContentWarning: extractContentWarning(record),
 		SourceURL:      atURIToHTTPS(n.URI),
 		ShowSourceLink: p.ShowSourceLink.Load(),
 		ProxyID:        n.URI,
@@ -649,6 +651,27 @@ func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayN
 // publishBskyAuthorProfile is a convenience wrapper used by the notification path.
 func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) {
 	p.publishAuthorProfile(ctx, n.Author.DID, n.Author.Handle, n.Author.DisplayName)
+}
+
+// extractContentWarning returns a content warning label value from a Bluesky
+// post record's self-labels block. Returns empty string if no CW label is found.
+func extractContentWarning(record map[string]interface{}) string {
+	labels, ok := record["labels"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	values, ok := labels["values"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, v := range values {
+		if m, ok := v.(map[string]interface{}); ok {
+			if val, _ := m["val"].(string); val == "!warn" || val == "sexual" || val == "nudity" || val == "graphic-media" {
+				return val
+			}
+		}
+	}
+	return ""
 }
 
 // sendDMNotification delivers a Bluesky interaction as a NIP-04 self-DM.

@@ -2,6 +2,7 @@ package bsky
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
@@ -17,20 +18,56 @@ type PosterStore interface {
 	GetNostrIDForObject(apID string) (string, bool)
 }
 
+// PosterEnqueuer is an optional interface for persisting outbound Bluesky
+// deliveries via the outbox queue.
+type PosterEnqueuer interface {
+	EnqueueBsky(destURL, payload string, priority int, sourceEventID string) error
+}
+
 // Poster handles outbound bridging from Nostr events to Bluesky records.
 type Poster struct {
 	Client          *Client
 	Store           PosterStore
 	LocalDomain     string
 	ExternalBaseURL string
+	// Enqueuer, when non-nil, routes Bluesky posts through the outbox queue.
+	Enqueuer PosterEnqueuer
 }
 
 // Handle processes a Nostr event and mirrors it to Bluesky when appropriate.
 // Called from nostr.Handler; runs in a goroutine.
 func (p *Poster) Handle(ctx context.Context, event *nostr.Event) {
+	if p.Enqueuer != nil {
+		if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
+			return
+		}
+		type bskyPayload struct {
+			Kind    int          `json:"kind"`
+			EventID string       `json:"event_id"`
+			Event   *nostr.Event `json:"event"`
+		}
+		payload, err := json.Marshal(bskyPayload{
+			Kind:    event.Kind,
+			EventID: event.ID,
+			Event:   event,
+		})
+		if err != nil {
+			slog.Warn("bsky: failed to marshal event for outbox", "id", event.ID, "error", err)
+			return
+		}
+		priority := 1
+		switch event.Kind {
+		case 7, 6, 5:
+			priority = 0
+		}
+		if err := p.Enqueuer.EnqueueBsky(p.Client.PDSURL, string(payload), priority, event.ID); err != nil {
+			slog.Warn("bsky: failed to enqueue", "id", event.ID, "error", err)
+		}
+		return
+	}
+
 	switch event.Kind {
 	case 1:
-		// Skip if this is a repost-style kind-1 (has "r" or "t" tags with URLs only).
 		p.handleKind1(ctx, event)
 	case 5:
 		p.handleKind5(ctx, event)
@@ -39,6 +76,22 @@ func (p *Poster) Handle(ctx context.Context, event *nostr.Event) {
 	case 7:
 		p.handleKind7(ctx, event)
 	}
+}
+
+// HandleDirect processes a Nostr event with direct Bluesky delivery (no outbox).
+// Called by outbox workers to perform the actual XRPC calls.
+func (p *Poster) HandleDirect(ctx context.Context, event *nostr.Event) error {
+	switch event.Kind {
+	case 1:
+		p.handleKind1(ctx, event)
+	case 5:
+		p.handleKind5(ctx, event)
+	case 6:
+		p.handleKind6(ctx, event)
+	case 7:
+		p.handleKind7(ctx, event)
+	}
+	return nil
 }
 
 // handleKind1 posts a Nostr note to Bluesky.

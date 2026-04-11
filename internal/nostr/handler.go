@@ -24,6 +24,18 @@ type BskyPoster interface {
 	Handle(ctx context.Context, event *nostr.Event)
 }
 
+// MuteStore provides KV access for mute list persistence.
+type MuteStore interface {
+	GetKV(key string) (string, bool)
+	SetKV(key, value string) error
+}
+
+// BskyMuter is the interface for Bluesky mute operations.
+type BskyMuter interface {
+	MuteActor(ctx context.Context, did string) error
+	UnmuteActor(ctx context.Context, did string) error
+}
+
 // RelayUpdater is the subset of the relay manager used by the kind-10002 handler.
 // The relayManagerAdapter in cmd/klistr/main.go satisfies this interface and
 // persists changes to the KV store so they survive restarts.
@@ -44,6 +56,10 @@ type Handler struct {
 	BskyPoster BskyPoster
 	// RelayUpdater syncs the relay list when a kind-10002 event is received (optional).
 	RelayUpdater RelayUpdater
+	// MuteStore persists the mute list for diffing (optional).
+	MuteStore MuteStore
+	// BskyMuter propagates mutes to Bluesky (optional).
+	BskyMuter BskyMuter
 }
 
 // Handle processes a single Nostr event.
@@ -79,6 +95,8 @@ func (h *Handler) Handle(ctx context.Context, event *nostr.Event) {
 		h.handleKind7(ctx, event)
 	case 9735:
 		h.handleKind9735(ctx, event)
+	case 10000:
+		h.handleKind10000(ctx, event)
 	case 10002:
 		h.handleKind10002(event)
 	case 1068:
@@ -204,6 +222,112 @@ func (h *Handler) handleKind10002(event *nostr.Event) {
 			}
 		}
 	}
+}
+
+func (h *Handler) handleKind10000(ctx context.Context, event *nostr.Event) {
+	if h.MuteStore == nil {
+		return
+	}
+
+	// 1. Extract current muted pubkeys from p-tags.
+	currentMutes := make(map[string]struct{})
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "p" {
+			currentMutes[tag[1]] = struct{}{}
+		}
+	}
+
+	// 2. Load previous mutes from KV.
+	previousMutes := make(map[string]struct{})
+	if val, ok := h.MuteStore.GetKV("muted_pubkeys"); ok && val != "" {
+		for _, pk := range strings.Split(val, ",") {
+			if pk != "" {
+				previousMutes[pk] = struct{}{}
+			}
+		}
+	}
+
+	// 3. Diff: find newly muted and newly unmuted pubkeys.
+	var newMutes, removedMutes []string
+	for pk := range currentMutes {
+		if _, was := previousMutes[pk]; !was {
+			newMutes = append(newMutes, pk)
+		}
+	}
+	for pk := range previousMutes {
+		if _, is := currentMutes[pk]; !is {
+			removedMutes = append(removedMutes, pk)
+		}
+	}
+
+	if len(newMutes) == 0 && len(removedMutes) == 0 {
+		return
+	}
+
+	// 4. Store updated mute list.
+	var pks []string
+	for pk := range currentMutes {
+		pks = append(pks, pk)
+	}
+	if err := h.MuteStore.SetKV("muted_pubkeys", strings.Join(pks, ",")); err != nil {
+		slog.Warn("mute: failed to persist mute list", "error", err)
+	}
+
+	// 5. Propagate new mutes.
+	for _, pk := range newMutes {
+		if actorURL, ok := h.resolveMuteAPActor(pk); ok {
+			block := ap.ToBlock(actorURL, h.TC)
+			h.Federator.Federate(ctx, block)
+		}
+		if h.BskyMuter != nil {
+			if did, ok := h.resolveBskyDID(pk); ok {
+				if err := h.BskyMuter.MuteActor(ctx, did); err != nil {
+					slog.Warn("mute: bsky mute failed", "did", did, "error", err)
+				}
+			}
+		}
+	}
+
+	// 6. Propagate removed mutes (unmute).
+	for _, pk := range removedMutes {
+		if actorURL, ok := h.resolveMuteAPActor(pk); ok {
+			undoBlock := ap.BuildUndoBlock(actorURL, h.TC)
+			h.Federator.Federate(ctx, undoBlock)
+		}
+		if h.BskyMuter != nil {
+			if did, ok := h.resolveBskyDID(pk); ok {
+				if err := h.BskyMuter.UnmuteActor(ctx, did); err != nil {
+					slog.Warn("mute: bsky unmute failed", "did", did, "error", err)
+				}
+			}
+		}
+	}
+
+	slog.Info("mute list synced", "added", len(newMutes), "removed", len(removedMutes), "total", len(currentMutes))
+}
+
+// resolveMuteAPActor returns the AP actor URL for a pubkey, if it starts with "http".
+func (h *Handler) resolveMuteAPActor(pubkey string) (string, bool) {
+	if h.Store == nil {
+		return "", false
+	}
+	val, ok := h.Store.GetActorForKey(pubkey)
+	if !ok || !strings.HasPrefix(val, "http") {
+		return "", false
+	}
+	return val, true
+}
+
+// resolveBskyDID returns the Bluesky DID for a pubkey, if it starts with "did:".
+func (h *Handler) resolveBskyDID(pubkey string) (string, bool) {
+	if h.Store == nil {
+		return "", false
+	}
+	val, ok := h.Store.GetActorForKey(pubkey)
+	if !ok || !strings.HasPrefix(val, "did:") {
+		return "", false
+	}
+	return val, true
 }
 
 func (h *Handler) handleKind1068(ctx context.Context, event *nostr.Event) {

@@ -59,7 +59,7 @@ func (p *Poster) Handle(ctx context.Context, event *nostr.Event) {
 		}
 		priority := 1
 		switch event.Kind {
-		case 7, 6, 5:
+		case 7, 6, 5, 9735:
 			priority = 0
 		}
 		if err := p.Enqueuer.EnqueueBsky(p.Client.PDSURL, string(payload), priority, event.ID); err != nil {
@@ -77,6 +77,8 @@ func (p *Poster) Handle(ctx context.Context, event *nostr.Event) {
 		p.handleKind6(ctx, event)
 	case 7:
 		p.handleKind7(ctx, event)
+	case 9735:
+		p.handleKind9735(ctx, event)
 	}
 }
 
@@ -93,6 +95,8 @@ func (p *Poster) HandleDirect(ctx context.Context, event *nostr.Event) error {
 		return p.handleKind6Direct(ctx, event)
 	case 7:
 		return p.handleKind7Direct(ctx, event)
+	case 9735:
+		return p.handleKind9735Direct(ctx, event)
 	}
 	return nil
 }
@@ -304,6 +308,78 @@ func (p *Poster) handleKind7Direct(ctx context.Context, event *nostr.Event) erro
 	atURI, ok := p.Store.GetAPIDForObject(likedNostrID)
 	if !ok || !strings.HasPrefix(atURI, "at://") {
 		return nil // target not bridged, not retryable
+	}
+	rec := LikeRecord{
+		Type:      likeType,
+		Subject:   Ref{URI: atURI},
+		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
+	}
+	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
+		Repo:       p.Client.DID(),
+		Collection: "app.bsky.feed.like",
+		Record:     rec,
+	})
+	if err != nil {
+		return err
+	}
+	p.Store.AddObject(resp.URI, event.ID)
+	return nil
+}
+
+// handleKind9735 bridges a zap receipt as a Bluesky like.
+func (p *Poster) handleKind9735(ctx context.Context, event *nostr.Event) {
+	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
+		return
+	}
+	var zappedNostrID string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "e" {
+			zappedNostrID = tag[1]
+			break
+		}
+	}
+	if zappedNostrID == "" {
+		return
+	}
+	atURI, ok := p.Store.GetAPIDForObject(zappedNostrID)
+	if !ok || !strings.HasPrefix(atURI, "at://") {
+		return
+	}
+	rec := LikeRecord{
+		Type:      likeType,
+		Subject:   Ref{URI: atURI},
+		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
+	}
+	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
+		Repo:       p.Client.DID(),
+		Collection: "app.bsky.feed.like",
+		Record:     rec,
+	})
+	if err != nil {
+		slog.Warn("bsky: failed to bridge zap as like", "id", event.ID, "error", err)
+		return
+	}
+	p.Store.AddObject(resp.URI, event.ID)
+}
+
+// handleKind9735Direct is like handleKind9735 but returns errors for outbox retry.
+func (p *Poster) handleKind9735Direct(ctx context.Context, event *nostr.Event) error {
+	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
+		return nil
+	}
+	var zappedNostrID string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "e" {
+			zappedNostrID = tag[1]
+			break
+		}
+	}
+	if zappedNostrID == "" {
+		return nil
+	}
+	atURI, ok := p.Store.GetAPIDForObject(zappedNostrID)
+	if !ok || !strings.HasPrefix(atURI, "at://") {
+		return nil
 	}
 	rec := LikeRecord{
 		Type:      likeType,

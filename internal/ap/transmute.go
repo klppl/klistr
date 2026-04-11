@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -327,10 +328,18 @@ func ToZap(event *nostr.Event, tc *TransmuteContext) map[string]interface{} {
 		}
 	}
 
+	// Extract bolt11 invoice from event tags.
+	var bolt11 string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "bolt11" {
+			bolt11 = tag[1]
+		}
+	}
+
 	act := map[string]interface{}{
 		"@context": DefaultContext,
 		"id":       tc.objectURL(event.ID),
-		"type":     "Zap",
+		"type":     []string{"Zap", "Like"},
 		"actor":    tc.LocalActorURL,
 		"object":   tc.objectURL(reactedID),
 		"to":       []string{PublicURI},
@@ -339,6 +348,15 @@ func ToZap(event *nostr.Event, tc *TransmuteContext) map[string]interface{} {
 	}
 	if content != "" {
 		act["content"] = content
+	}
+	if amountMsats > 0 {
+		act["amount"] = map[string]interface{}{
+			"value":    amountMsats,
+			"currency": "millisatoshi",
+		}
+	}
+	if bolt11 != "" {
+		act["bolt11"] = bolt11
 	}
 	return act
 }
@@ -634,6 +652,30 @@ func BuildReject(followActivity map[string]interface{}, localActorID string, fol
 		"actor":    localActorID,
 		"object":   followActivity,
 		"to":       []string{followerID},
+	}
+}
+
+// ToBlock creates an AP Block activity targeting the given actor URL.
+func ToBlock(actorURL string, tc *TransmuteContext) map[string]interface{} {
+	id := tc.LocalActorURL + "#block-" + url.PathEscape(actorURL)
+	return map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       id,
+		"type":     "Block",
+		"actor":    tc.LocalActorURL,
+		"object":   actorURL,
+	}
+}
+
+// BuildUndoBlock creates an AP Undo(Block) activity for the given actor URL.
+func BuildUndoBlock(actorURL string, tc *TransmuteContext) map[string]interface{} {
+	blockActivity := ToBlock(actorURL, tc)
+	return map[string]interface{}{
+		"@context": DefaultContext,
+		"id":       tc.LocalActorURL + "#undo-block-" + url.PathEscape(actorURL),
+		"type":     "Undo",
+		"actor":    tc.LocalActorURL,
+		"object":   blockActivity,
 	}
 }
 

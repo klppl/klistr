@@ -576,24 +576,25 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		if id, ok := h.resolveNostrID(note.InReplyTo); ok {
 			replyToEventID = id
 
-			// Determine the thread root for the NIP-10 "root" marker.
-			// The parent AP object is almost always already in the cache because
-			// handleCreate pre-fetches it just before calling noteToEvent, so
-			// this is typically a zero-latency cache hit.
-			if parentObj, err := FetchObject(ctx, note.InReplyTo); err == nil {
-				parentNote := mapToNote(parentObj)
-				if parentNote != nil && parentNote.InReplyTo != "" {
-					// Parent is itself a reply; resolve its InReplyTo as our root.
-					if rootID, ok2 := h.resolveNostrID(parentNote.InReplyTo); ok2 {
-						rootEventID = rootID
-					}
+			// Walk the reply chain up to 10 levels to find the true thread root.
+			const maxAncestorDepth = 10
+			rootEventID = replyToEventID
+			currentURL := note.InReplyTo
+
+			for depth := 0; depth < maxAncestorDepth; depth++ {
+				parentObj, err := FetchObject(ctx, currentURL)
+				if err != nil {
+					break
 				}
-			}
-			// If root is still empty (parent is the root, or grandparent is
-			// not in our DB), set root = direct parent so BuildKind1Event
-			// emits a single "reply" e-tag instead of a bare positional tag.
-			if rootEventID == "" {
-				rootEventID = replyToEventID
+				parentNote := mapToNote(parentObj)
+				if parentNote == nil || parentNote.InReplyTo == "" {
+					break // reached the root — currentURL is the root post
+				}
+				// Try to resolve the next ancestor
+				if ancestorID, ok := h.resolveNostrID(parentNote.InReplyTo); ok {
+					rootEventID = ancestorID
+				}
+				currentURL = parentNote.InReplyTo
 			}
 		} else {
 			// Parent is unresolvable even after the pre-fetch in handleCreate.

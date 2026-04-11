@@ -236,6 +236,57 @@ func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error)
 	return &resp, nil
 }
 
+// UploadBlob uploads binary data to the PDS and returns a BlobRef for use in embeds.
+// The XRPC endpoint is com.atproto.repo.uploadBlob; the body is raw bytes with
+// the Content-Type header set to mimeType.
+func (c *Client) UploadBlob(ctx context.Context, data []byte, mimeType string) (*BlobRef, error) {
+	staleToken := c.currentToken()
+
+	blob, err := c.doUploadBlob(ctx, data, mimeType)
+	if isAuthError(err) {
+		if authErr := c.singleAuthenticate(ctx, staleToken); authErr != nil {
+			return nil, fmt.Errorf("re-authenticate: %w", authErr)
+		}
+		blob, err = c.doUploadBlob(ctx, data, mimeType)
+	}
+	var rl *errRateLimited
+	if errors.As(err, &rl) {
+		wait := rl.RetryAfter
+		if wait > rateLimitRetryMax {
+			wait = rateLimitRetryMax
+		}
+		slog.Warn("bsky rate limited on uploadBlob, backing off", "retry_after", wait.Round(time.Second))
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		blob, err = c.doUploadBlob(ctx, data, mimeType)
+	}
+	return blob, err
+}
+
+func (c *Client) doUploadBlob(ctx context.Context, data []byte, mimeType string) (*BlobRef, error) {
+	rawURL := c.PDSURL + "/xrpc/com.atproto.repo.uploadBlob"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("create uploadBlob request: %w", err)
+	}
+	req.Header.Set("Content-Type", mimeType)
+	req.Header.Set("User-Agent", "klistr/1.0 (https://github.com/klppl/klistr)")
+	if auth := c.authHeader(); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+
+	var wrapper struct {
+		Blob BlobRef `json:"blob"`
+	}
+	if err := c.doRequest(req, &wrapper); err != nil {
+		return nil, fmt.Errorf("bsky uploadBlob: %w", err)
+	}
+	return &wrapper.Blob, nil
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 // errAuthExpired is returned by doRequest when the PDS signals that the

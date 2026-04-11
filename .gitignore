@@ -1,2 +1,16 @@
+# Claude Code
 .claude/
 .worktrees/
+docs/superpowers/
+
+# Build artifacts
+klistr
+*.pem
+
+# Database (local dev)
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env

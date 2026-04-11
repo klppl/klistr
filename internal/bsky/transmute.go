@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/rivo/uniseg"
 
 	"github.com/klppl/klistr/internal/bridge"
@@ -53,8 +54,8 @@ func NostrNoteToFeedPost(event *nostr.Event, externalBaseURL string, getATURI fu
 		Langs:     []string{"en"},
 	}
 
-	// Build facets for URLs and hashtags.
-	post.Facets = buildFacets(text)
+	// Build facets for URLs, hashtags, and nostr:npub mentions.
+	post.Facets = buildFacets(text, nil)
 
 	// Resolve reply threading via e-tags.
 	if getATURI != nil {
@@ -129,9 +130,12 @@ func buildReply(event *nostr.Event, getATURI func(string) (string, bool)) *Reply
 	}
 }
 
-// buildFacets scans text for URLs and hashtags and returns rich-text facets.
-// Byte offsets are computed over the UTF-8 encoded text, as required by AT Protocol.
-func buildFacets(text string) []Facet {
+// buildFacets scans text for URLs, hashtags, and nostr:npub mentions and
+// returns rich-text facets. Byte offsets are computed over the UTF-8 encoded
+// text, as required by AT Protocol.
+// resolveDID is an optional callback that maps a Nostr hex pubkey to a Bluesky
+// DID for mention facets. Pass nil to skip npub mention resolution.
+func buildFacets(text string, resolveDID func(pubkey string) (string, bool)) []Facet {
 	var facets []Facet
 
 	// URLs.
@@ -165,6 +169,31 @@ func buildFacets(text string) []Facet {
 				Tag:  tagName,
 			}},
 		})
+	}
+
+	// nostr:npub mentions → Bluesky mention facets.
+	if resolveDID != nil {
+		npubRe := regexp.MustCompile(`nostr:npub1[a-z0-9]+`)
+		for _, loc := range npubRe.FindAllStringIndex(text, -1) {
+			bech32 := text[loc[0]+6 : loc[1]] // strip "nostr:" prefix
+			prefix, val, err := nip19.Decode(bech32)
+			if err != nil || prefix != "npub" {
+				continue
+			}
+			pubkey, _ := val.(string)
+			if pubkey == "" {
+				continue
+			}
+			if did, ok := resolveDID(pubkey); ok {
+				facets = append(facets, Facet{
+					Index: ByteSlice{ByteStart: loc[0], ByteEnd: loc[1]},
+					Features: []FacetFeature{{
+						Type: "app.bsky.richtext.facet#mention",
+						DID:  did,
+					}},
+				})
+			}
+		}
 	}
 
 	return facets

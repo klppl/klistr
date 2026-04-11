@@ -25,12 +25,15 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/json"
+
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/klppl/klistr/internal/ap"
 	"github.com/klppl/klistr/internal/bsky"
 	"github.com/klppl/klistr/internal/config"
 	"github.com/klppl/klistr/internal/db"
 	nostrpkg "github.com/klppl/klistr/internal/nostr"
+	"github.com/klppl/klistr/internal/outbox"
 	"github.com/klppl/klistr/internal/server"
 )
 
@@ -226,6 +229,10 @@ func main() {
 		}
 	}
 
+	// ─── Outbox Queue ────────────────────────────────────────────────────────
+	outboxQueue := outbox.NewQueue(store.DB(), store.Driver())
+	enqueuer := &outbox.EnqueueAdapter{Queue: outboxQueue}
+
 	// Shared atomic bools — updated live by the admin settings API.
 	showSourceLink := &atomic.Bool{}
 	showSourceLink.Store(cfg.ShowSourceLink)
@@ -245,6 +252,7 @@ func main() {
 
 	// ─── Nostr Publisher ──────────────────────────────────────────────────────
 	publisher := nostrpkg.NewPublisher(cfg.NostrRelays)
+	publisher.Enqueuer = enqueuer
 
 	// ─── AP Transmute Context ─────────────────────────────────────────────────
 	localActorURL := cfg.BaseURL("/users/" + cfg.NostrUsername)
@@ -266,6 +274,7 @@ func main() {
 		GetFollowers: func(actorURL string) ([]string, error) {
 			return store.GetFollowers(actorURL)
 		},
+		Enqueuer: enqueuer,
 	}
 
 	// ─── AP Handler (incoming ActivityPub → Nostr) ────────────────────────────
@@ -309,6 +318,7 @@ func main() {
 				Store:           store,
 				LocalDomain:     cfg.LocalDomain,
 				ExternalBaseURL: cfg.ExternalBaseURL,
+				Enqueuer:        enqueuer,
 			}
 			bskyTrigger = make(chan struct{}, 1)
 			poller := &bsky.Poller{
@@ -349,6 +359,80 @@ func main() {
 	// inbound relay list sync) and the HTTP server (admin UI relay management).
 	relayMgr := &relayManagerAdapter{publisher: publisher, pool: pool, store: store}
 	nostrHandler.RelayUpdater = relayMgr
+
+	// ─── Outbox Worker Pool ──────────────────────────────────────────────────
+	workerPool := outbox.NewWorkerPool(outboxQueue, outbox.WorkerPoolConfig{
+		APWorkers:    cfg.APFederationConcurrency,
+		RelayWorkers: 5,
+		BskyWorkers:  1,
+		PollInterval: 100 * time.Millisecond,
+	})
+
+	// AP delivery worker: deserializes payload and calls DeliverActivity.
+	workerPool.RegisterDeliverer("ap", func(ctx context.Context, item outbox.Item) error {
+		var activity map[string]interface{}
+		if err := json.Unmarshal([]byte(item.Payload), &activity); err != nil {
+			return fmt.Errorf("unmarshal AP activity: %w", err)
+		}
+		return ap.DeliverActivity(ctx, item.DestURL, activity, federator.KeyID, keyPair.Private)
+	})
+
+	// Relay delivery worker: deserializes event and publishes to one relay.
+	workerPool.RegisterDeliverer("relay", func(ctx context.Context, item outbox.Item) error {
+		if publisher.IsCircuitOpen(item.DestURL) {
+			return fmt.Errorf("circuit open for %s", item.DestURL)
+		}
+		var event gonostr.Event
+		if err := json.Unmarshal([]byte(item.Payload), &event); err != nil {
+			return fmt.Errorf("unmarshal nostr event: %w", err)
+		}
+		publishCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		for result := range publisher.GetPool().PublishMany(publishCtx, []string{item.DestURL}, event) {
+			publisher.RecordRelayResult(result.RelayURL, result.Error)
+			if result.Error != nil {
+				return result.Error
+			}
+		}
+		return nil
+	})
+
+	// Bluesky delivery worker: deserializes event and calls HandleDirect.
+	if activeBskyClient != nil {
+		bskyPoster := nostrHandler.BskyPoster.(*bsky.Poster)
+		workerPool.RegisterDeliverer("bsky", func(ctx context.Context, item outbox.Item) error {
+			var payload struct {
+				Kind    int            `json:"kind"`
+				EventID string         `json:"event_id"`
+				Event   *gonostr.Event `json:"event"`
+			}
+			if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+				return fmt.Errorf("unmarshal bsky payload: %w", err)
+			}
+			return bskyPoster.HandleDirect(ctx, payload.Event)
+		})
+	}
+
+	workerPool.Start(ctx)
+
+	// ─── Outbox Cleanup ──────────────────────────────────────────────────────
+	go func() {
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				removed, err := outboxQueue.Cleanup(48*time.Hour, 168*time.Hour)
+				if err != nil {
+					slog.Warn("outbox cleanup error", "error", err)
+				} else if removed > 0 {
+					slog.Info("outbox cleanup", "removed", removed)
+				}
+			}
+		}
+	}()
 
 	// ─── Start HTTP server ────────────────────────────────────────────────────
 	srv := server.New(cfg, store, keyPair, apHandler, store, signer)

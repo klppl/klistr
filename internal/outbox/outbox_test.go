@@ -9,12 +9,16 @@ import (
 )
 
 // testQueue creates an in-memory SQLite queue for testing.
+// MaxOpenConns(1) is required because ":memory:" creates a separate DB per
+// connection; limiting to one connection ensures all goroutines share the
+// same in-memory database (same behavior as the production SQLite config).
 func testQueue(t *testing.T) *Queue {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	q := NewQueue(db, "sqlite")
 	if err := q.Migrate(); err != nil {

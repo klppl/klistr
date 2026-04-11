@@ -41,16 +41,68 @@ type DeleteRecordRequest struct {
 	RKey       string `json:"rkey"`
 }
 
+// ─── Blob / Embed types ──────────────────────────────────────────────────────
+
+// BlobRef represents a Bluesky blob reference returned by uploadBlob.
+type BlobRef struct {
+	Type string `json:"$type"` // "blob"
+	Ref  struct {
+		Link string `json:"$link"`
+	} `json:"ref"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
+}
+
+// Embed is the polymorphic embed field on FeedPost.
+type Embed struct {
+	Type   string       `json:"$type"`
+	Images []EmbedImage `json:"images,omitempty"`
+	Record *EmbedRef    `json:"record,omitempty"`
+	Media  *Embed       `json:"media,omitempty"`
+}
+
+// EmbedImage is a single image within an embed.images.
+type EmbedImage struct {
+	Alt         string       `json:"alt"`
+	Image       BlobRef      `json:"image"`
+	AspectRatio *AspectRatio `json:"aspectRatio,omitempty"`
+}
+
+// AspectRatio for image/video embeds.
+type AspectRatio struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// EmbedRef references another record (for quote posts).
+type EmbedRef struct {
+	URI string `json:"uri"`
+	CID string `json:"cid,omitempty"`
+}
+
+// SelfLabels for content warnings on Bluesky posts.
+type SelfLabels struct {
+	Type   string      `json:"$type"`
+	Values []SelfLabel `json:"values"`
+}
+
+// SelfLabel is a single self-applied label.
+type SelfLabel struct {
+	Val string `json:"val"`
+}
+
 // ─── Feed post record (app.bsky.feed.post) ────────────────────────────────────
 
 // FeedPost is the lexicon record for a Bluesky post.
 type FeedPost struct {
-	Type      string   `json:"$type"`
-	Text      string   `json:"text"`
-	CreatedAt string   `json:"createdAt"`
-	Facets    []Facet  `json:"facets,omitempty"`
-	Reply     *Reply   `json:"reply,omitempty"`
-	Langs     []string `json:"langs,omitempty"`
+	Type      string      `json:"$type"`
+	Text      string      `json:"text"`
+	CreatedAt string      `json:"createdAt"`
+	Facets    []Facet     `json:"facets,omitempty"`
+	Reply     *Reply      `json:"reply,omitempty"`
+	Langs     []string    `json:"langs,omitempty"`
+	Embed     *Embed      `json:"embed,omitempty"`
+	Labels    *SelfLabels `json:"labels,omitempty"`
 }
 
 // Facet describes rich-text annotations (links, mentions, tags).

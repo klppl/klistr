@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +12,12 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"golang.org/x/time/rate"
 )
+
+// PublishEnqueuer is an optional interface for persisting outbound relay
+// deliveries via the outbox queue.
+type PublishEnqueuer interface {
+	EnqueueRelay(destURL, payload string, priority int, sourceEventID string) error
+}
 
 // EventHandler is a function that processes a Nostr event.
 type EventHandler func(ctx context.Context, event *nostr.Event)
@@ -311,6 +318,8 @@ type Publisher struct {
 	pool     *nostr.SimplePool
 	poolOnce sync.Once
 	limiter  *rate.Limiter
+	// Enqueuer, when non-nil, routes publish calls through the outbox queue.
+	Enqueuer PublishEnqueuer
 }
 
 const (
@@ -426,6 +435,27 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 	allRelays := append([]string{}, p.relays...)
 	p.mu.RUnlock()
 
+	if p.Enqueuer != nil {
+		eventJSON, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("relay publish: marshal event: %w", err)
+		}
+		payload := string(eventJSON)
+		priority := 1
+		switch event.Kind {
+		case 7, 6, 5:
+			priority = 0
+		case 0, 10002:
+			priority = 2
+		}
+		for _, url := range allRelays {
+			if err := p.Enqueuer.EnqueueRelay(url, payload, priority, event.ID); err != nil {
+				slog.Warn("relay publish: failed to enqueue", "relay", url, "error", err)
+			}
+		}
+		return nil
+	}
+
 	if len(allRelays) == 0 {
 		slog.Warn("no write relays configured; event not published", "id", event.ID, "kind", event.Kind)
 		return nil
@@ -508,6 +538,30 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 		return fmt.Errorf("failed to publish to all %d active relays", failed)
 	}
 	return nil
+}
+
+// GetPool returns the underlying nostr.SimplePool for direct relay operations.
+func (p *Publisher) GetPool() *nostr.SimplePool {
+	return p.getPool()
+}
+
+// IsCircuitOpen returns true if the given relay's circuit breaker is open.
+func (p *Publisher) IsCircuitOpen(relayURL string) bool {
+	return p.getCircuit(relayURL).isOpen()
+}
+
+// RecordRelayResult updates the circuit breaker state for a relay after delivery.
+func (p *Publisher) RecordRelayResult(relayURL string, err error) {
+	cb := p.getCircuit(relayURL)
+	if err == nil {
+		cb.recordSuccess()
+		return
+	}
+	if isPowRequired(err) {
+		cb.openForPoW()
+	} else if !isPolicyRejection(err) {
+		cb.recordFailure()
+	}
 }
 
 // isPowRequired returns true if the relay rejected the event due to a

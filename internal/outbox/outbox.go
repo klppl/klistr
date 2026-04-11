@@ -222,6 +222,20 @@ func (q *Queue) Fail(id int64, errMsg string) error {
 	return err
 }
 
+// Reschedule puts a claimed item back to pending with a specific delay,
+// without incrementing the attempt counter. Used for circuit-open fast-fail.
+func (q *Queue) Reschedule(id int64, delay time.Duration) error {
+	nextRetry := time.Now().UTC().Add(delay).Format(time.RFC3339Nano)
+	var query string
+	if q.driver == "sqlite" {
+		query = `UPDATE outbox SET status = 'pending', next_retry_at = ? WHERE id = ?`
+	} else {
+		query = `UPDATE outbox SET status = 'pending', next_retry_at = $1 WHERE id = $2`
+	}
+	_, err := q.db.Exec(query, nextRetry, id)
+	return err
+}
+
 // Get retrieves a single outbox item by ID.
 func (q *Queue) Get(id int64) (Item, error) {
 	var query string

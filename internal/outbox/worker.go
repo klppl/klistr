@@ -2,10 +2,16 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
 )
+
+// ErrCircuitOpen is returned by delivery functions when a relay circuit breaker
+// is open. The worker reschedules the item without incrementing attempts or
+// logging a warning — the circuit will recover on its own.
+var ErrCircuitOpen = errors.New("circuit open")
 
 // DeliverFunc is the signature for protocol-specific delivery logic.
 type DeliverFunc func(ctx context.Context, item Item) error
@@ -72,7 +78,8 @@ func (wp *WorkerPool) runWorker(ctx context.Context, destType string, workerID i
 
 		item, ok, err := wp.queue.Claim(destType)
 		if err != nil {
-			slog.Warn("outbox claim error", "dest_type", destType, "error", err)
+			// SQLITE_BUSY is expected contention with multiple workers — not actionable.
+			slog.Debug("outbox claim contention", "dest_type", destType, "error", err)
 			wp.sleep(ctx)
 			continue
 		}
@@ -98,6 +105,12 @@ func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
 
 	err := fn(ctx, item)
 	if err != nil {
+		if errors.Is(err, ErrCircuitOpen) {
+			// Circuit is open — reschedule silently without burning an attempt.
+			// The circuit breaker will recover on its own (5 min cooldown).
+			wp.queue.Reschedule(item.ID, 5*time.Minute)
+			return
+		}
 		slog.Warn("outbox delivery failed",
 			"dest_type", item.DestType,
 			"dest_url", item.DestURL,

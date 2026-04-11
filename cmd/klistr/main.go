@@ -366,10 +366,10 @@ func main() {
 
 	// ─── Outbox Worker Pool ──────────────────────────────────────────────────
 	workerPool := outbox.NewWorkerPool(outboxQueue, outbox.WorkerPoolConfig{
-		APWorkers:    cfg.APFederationConcurrency,
-		RelayWorkers: 5,
+		APWorkers:    2,
+		RelayWorkers: 1,
 		BskyWorkers:  1,
-		PollInterval: 100 * time.Millisecond,
+		PollInterval: 500 * time.Millisecond,
 	})
 
 	// AP delivery worker: deserializes payload and calls DeliverActivity.
@@ -383,8 +383,9 @@ func main() {
 
 	// Relay delivery worker: deserializes event and publishes to one relay.
 	workerPool.RegisterDeliverer("relay", func(ctx context.Context, item outbox.Item) error {
+		// Fast-fail: if the circuit is open, reschedule without burning an attempt.
 		if publisher.IsCircuitOpen(item.DestURL) {
-			return fmt.Errorf("circuit open for %s", item.DestURL)
+			return outbox.ErrCircuitOpen
 		}
 		var event gonostr.Event
 		if err := json.Unmarshal([]byte(item.Payload), &event); err != nil {

@@ -3,8 +3,8 @@
 .worktrees/
 docs/superpowers/
 
-# Build artifacts
-klistr
+# Build artifacts (binary in repo root only, not cmd/klistr/ source dir)
+/klistr
 *.pem
 
 # Database (local dev)

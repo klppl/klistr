@@ -3,6 +3,7 @@ package bsky
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -553,4 +554,71 @@ func CollectionFromURI(uri string) string {
 		return ""
 	}
 	return parts[1]
+}
+
+// ─── Nostr → Bluesky helpers ────────────────────────────────────────────────
+
+// imetaInfo holds parsed NIP-94 imeta tag fields for outbound image uploads.
+type imetaInfo struct {
+	URL      string
+	Alt      string
+	MimeType string
+	Width    int
+	Height   int
+}
+
+// ExtractImetaTags parses NIP-94 imeta tags from a Nostr event.
+func ExtractImetaTags(event *nostr.Event, maxImages int) []imetaInfo {
+	var result []imetaInfo
+	for _, tag := range event.Tags {
+		if len(tag) < 2 || tag[0] != "imeta" {
+			continue
+		}
+		info := parseImetaFields(tag[1:])
+		if info.URL != "" {
+			result = append(result, info)
+			if len(result) >= maxImages {
+				break
+			}
+		}
+	}
+	return result
+}
+
+func parseImetaFields(fields []string) imetaInfo {
+	var info imetaInfo
+	for _, field := range fields {
+		parts := strings.SplitN(field, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch parts[0] {
+		case "url":
+			info.URL = parts[1]
+		case "alt":
+			info.Alt = parts[1]
+		case "m":
+			info.MimeType = parts[1]
+		case "dim":
+			if wh := strings.SplitN(parts[1], "x", 2); len(wh) == 2 {
+				info.Width, _ = strconv.Atoi(wh[0])
+				info.Height, _ = strconv.Atoi(wh[1])
+			}
+		}
+	}
+	return info
+}
+
+// BuildSelfLabels returns a SelfLabels struct if the Nostr event has a
+// content-warning tag, mapping it to a Bluesky "!warn" self-label.
+func BuildSelfLabels(event *nostr.Event) *SelfLabels {
+	for _, tag := range event.Tags {
+		if len(tag) >= 1 && tag[0] == "content-warning" {
+			return &SelfLabels{
+				Type:   "com.atproto.label.defs#selfLabels",
+				Values: []SelfLabel{{Val: "!warn"}},
+			}
+		}
+	}
+	return nil
 }

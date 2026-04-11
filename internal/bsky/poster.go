@@ -3,7 +3,9 @@ package bsky
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -331,6 +333,42 @@ func (p *Poster) postNote(ctx context.Context, event *nostr.Event) error {
 		return err
 	}
 
+	// Outbound images: extract NIP-94 imeta tags, download, upload as blobs.
+	images := ExtractImetaTags(event, 4)
+	if embed := p.uploadImages(ctx, images); embed != nil {
+		post.Embed = embed
+	}
+
+	// Quote post: detect q-tag and build embed.record (or recordWithMedia).
+	var quoteATURI string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "q" {
+			if uri, ok := getATURI(tag[1]); ok && strings.HasPrefix(uri, "at://") {
+				quoteATURI = uri
+			}
+			break
+		}
+	}
+	if quoteATURI != "" {
+		if post.Embed != nil && post.Embed.Type == "app.bsky.embed.images" {
+			post.Embed = &Embed{
+				Type:   "app.bsky.embed.recordWithMedia",
+				Record: &EmbedRef{URI: quoteATURI},
+				Media:  post.Embed,
+			}
+		} else {
+			post.Embed = &Embed{
+				Type:   "app.bsky.embed.record",
+				Record: &EmbedRef{URI: quoteATURI},
+			}
+		}
+	}
+
+	// Content warning: map NIP-36 content-warning tag to Bluesky self-labels.
+	if labels := BuildSelfLabels(event); labels != nil {
+		post.Labels = labels
+	}
+
 	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
 		Repo:       p.Client.DID(),
 		Collection: "app.bsky.feed.post",
@@ -342,4 +380,46 @@ func (p *Poster) postNote(ctx context.Context, event *nostr.Event) error {
 
 	slog.Info("bsky: posted note", "nostrID", event.ID, "atURI", resp.URI)
 	return p.Store.AddObject(resp.URI, event.ID)
+}
+
+// uploadImages downloads image URLs and uploads them as Bluesky blobs.
+func (p *Poster) uploadImages(ctx context.Context, images []imetaInfo) *Embed {
+	if len(images) == 0 {
+		return nil
+	}
+	var embedImages []EmbedImage
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	for _, img := range images {
+		resp, err := httpClient.Get(img.URL)
+		if err != nil {
+			slog.Debug("bsky: failed to download image", "url", img.URL, "error", err)
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 1_000_000))
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		mimeType := img.MimeType
+		if mimeType == "" {
+			mimeType = resp.Header.Get("Content-Type")
+		}
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+		blob, err := p.Client.UploadBlob(ctx, data, mimeType)
+		if err != nil {
+			slog.Warn("bsky: failed to upload blob", "url", img.URL, "error", err)
+			continue
+		}
+		ei := EmbedImage{Alt: img.Alt, Image: *blob}
+		if img.Width > 0 && img.Height > 0 {
+			ei.AspectRatio = &AspectRatio{Width: img.Width, Height: img.Height}
+		}
+		embedImages = append(embedImages, ei)
+	}
+	if len(embedImages) == 0 {
+		return nil
+	}
+	return &Embed{Type: "app.bsky.embed.images", Images: embedImages}
 }

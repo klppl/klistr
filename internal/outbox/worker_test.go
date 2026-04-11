@@ -93,9 +93,10 @@ func TestWorkerPoolRetriesOnFailure(t *testing.T) {
 func TestWorkerPoolRespectsPriority(t *testing.T) {
 	q := testQueue(t)
 
-	var order []int
+	// Use a channel to avoid data race on slice append from worker goroutine.
+	orderCh := make(chan int, 2)
 	deliverFn := func(ctx context.Context, item Item) error {
-		order = append(order, item.Priority)
+		orderCh <- item.Priority
 		return nil
 	}
 
@@ -106,19 +107,20 @@ func TestWorkerPoolRespectsPriority(t *testing.T) {
 	defer cancel()
 
 	wp := NewWorkerPool(q, WorkerPoolConfig{
-		APWorkers:    1,
+		APWorkers:    1, // single worker to force serial processing
 		PollInterval: 50 * time.Millisecond,
 	})
 	wp.RegisterDeliverer("ap", deliverFn)
 	wp.Start(ctx)
 
+	var order []int
 	deadline := time.After(2 * time.Second)
 	for len(order) < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("timed out: delivered %d, want 2", len(order))
-		default:
-			time.Sleep(10 * time.Millisecond)
+		case p := <-orderCh:
+			order = append(order, p)
 		}
 	}
 

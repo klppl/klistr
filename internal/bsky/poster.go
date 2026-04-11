@@ -80,18 +80,27 @@ func (p *Poster) Handle(ctx context.Context, event *nostr.Event) {
 
 // HandleDirect processes a Nostr event with direct Bluesky delivery (no outbox).
 // Called by outbox workers to perform the actual XRPC calls.
+// Returns an error if the primary delivery action fails, so the outbox can retry.
 func (p *Poster) HandleDirect(ctx context.Context, event *nostr.Event) error {
 	switch event.Kind {
 	case 1:
-		p.handleKind1(ctx, event)
+		return p.handleKind1Direct(ctx, event)
 	case 5:
 		p.handleKind5(ctx, event)
 	case 6:
-		p.handleKind6(ctx, event)
+		return p.handleKind6Direct(ctx, event)
 	case 7:
-		p.handleKind7(ctx, event)
+		return p.handleKind7Direct(ctx, event)
 	}
 	return nil
+}
+
+// handleKind1Direct is like handleKind1 but returns errors for outbox retry.
+func (p *Poster) handleKind1Direct(ctx context.Context, event *nostr.Event) error {
+	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
+		return nil // already bridged, not an error
+	}
+	return p.postNote(ctx, event)
 }
 
 // handleKind1 posts a Nostr note to Bluesky.
@@ -234,6 +243,81 @@ func (p *Poster) handleKind7(ctx context.Context, event *nostr.Event) {
 	if err := p.Store.AddObject(resp.URI, event.ID); err != nil {
 		slog.Warn("bsky: failed to store like mapping", "error", err)
 	}
+}
+
+// handleKind6Direct is like handleKind6 but returns errors for outbox retry.
+func (p *Poster) handleKind6Direct(ctx context.Context, event *nostr.Event) error {
+	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
+		return nil
+	}
+	var repostedNostrID string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "e" {
+			repostedNostrID = tag[1]
+			break
+		}
+	}
+	if repostedNostrID == "" {
+		return nil
+	}
+	atURI, ok := p.Store.GetAPIDForObject(repostedNostrID)
+	if !ok || !strings.HasPrefix(atURI, "at://") {
+		return nil // target not bridged, not retryable
+	}
+	rec := RepostRecord{
+		Type:      repostType,
+		Subject:   Ref{URI: atURI},
+		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
+	}
+	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
+		Repo:       p.Client.DID(),
+		Collection: "app.bsky.feed.repost",
+		Record:     rec,
+	})
+	if err != nil {
+		return err
+	}
+	p.Store.AddObject(resp.URI, event.ID)
+	return nil
+}
+
+// handleKind7Direct is like handleKind7 but returns errors for outbox retry.
+func (p *Poster) handleKind7Direct(ctx context.Context, event *nostr.Event) error {
+	if event.Content != "+" && event.Content != "" {
+		return nil
+	}
+	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
+		return nil
+	}
+	var likedNostrID string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "e" {
+			likedNostrID = tag[1]
+			break
+		}
+	}
+	if likedNostrID == "" {
+		return nil
+	}
+	atURI, ok := p.Store.GetAPIDForObject(likedNostrID)
+	if !ok || !strings.HasPrefix(atURI, "at://") {
+		return nil // target not bridged, not retryable
+	}
+	rec := LikeRecord{
+		Type:      likeType,
+		Subject:   Ref{URI: atURI},
+		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
+	}
+	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
+		Repo:       p.Client.DID(),
+		Collection: "app.bsky.feed.like",
+		Record:     rec,
+	})
+	if err != nil {
+		return err
+	}
+	p.Store.AddObject(resp.URI, event.ID)
+	return nil
 }
 
 // postNote creates a Bluesky post from a Nostr kind-1 event.

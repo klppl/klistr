@@ -31,12 +31,20 @@ Fediverse user → POST /inbox        Bluesky notification poll (30s)
 
 | ActivityPub → Nostr | Kind | Notes |
 |---|---|---|
-| `Create(Note)` | `1` | Text posts; threaded replies; images as NIP-94 `imeta` tags; anchor-text links appended to content |
+| `Create(Note)` | `1` | Text posts; threaded replies (10-level ancestry walk); images as NIP-94 `imeta` tags; content warnings preserved; `r`-tag with original URL |
+| `Create(Article)` | `30023` | Long-form articles |
+| `Create(Question)` | `1068` | Polls (NIP-69) |
 | `Announce` | `6` | Reposts |
 | `Update(Actor)` | `0` | Profile updates |
 | `Like` | `7` (`+`) | Reactions |
+| `Like` + zap extension | `9735` | Zap receipts (from Zap-aware AP servers) |
 | `EmojiReact` | `7` (emoji) | Emoji reactions |
 | `Delete` | `5` | Deletions |
+| `Block` | — | Cross-protocol mute (AP Block → tracked for unmute) |
+
+### Reliable delivery
+
+All outbound deliveries (AP federation, Nostr relay publish, Bluesky XRPC) flow through a persistent outbox queue backed by the database. If a relay or server is down, the bridge retries with exponential backoff (up to 1 hour) before dead-lettering. Priority lanes ensure real-time interactions (replies, likes) are never starved by background work (profile resyncs). Dead-lettered items are visible in the admin UI and can be manually retried.
 
 ### Signing
 
@@ -213,10 +221,13 @@ Restart klistr. You should see this log line on startup:
 
 | Nostr event | Bluesky action |
 |---|---|
-| Kind 1 (note) | Creates a post |
+| Kind 1 (note) | Creates a post (with images via blob upload, quote posts via `embed.record`) |
+| Kind 1 + `content-warning` tag | Creates a post with Bluesky self-label content warning |
 | Kind 5 (deletion) | Deletes the bridged post |
 | Kind 6 (repost) | Reposts (if the original was bridged) |
 | Kind 7 `+` (like) | Likes (if the original was bridged) |
+| Kind 9735 (zap receipt) | Likes (Lightning zaps become Bluesky likes) |
+| Kind 10000 (mute list) | Mutes/unmutes actors on Bluesky (cross-protocol sync) |
 
 | Bluesky → Nostr | How | Requires |
 |---|---|---|
@@ -234,9 +245,16 @@ Restart klistr. You should see this log line on startup:
 
 **Notes:**
 - Long Nostr posts (> 300 characters) are truncated and a link to the full post on njump.me is appended.
+- **Images** from Nostr posts (NIP-94 `imeta` tags) are downloaded, uploaded as Bluesky blobs, and attached as native image embeds (max 4 images, 1MB each).
+- **Quote posts** (Nostr `q`-tag) become native Bluesky quote posts (`embed.record`). When a post has both images and a quote, `embed.recordWithMedia` is used.
+- **Content warnings** (NIP-36 `content-warning` tag) become Bluesky self-labels, and vice versa.
+- **Mentions** (`nostr:npub` references) are converted to Bluesky mention facets when the DID is known, and Bluesky mention facets become Nostr `p`-tags.
+- **Zap receipts** (kind 9735) are bridged as Bluesky likes. On ActivityPub, zaps use a dual-type `["Zap", "Like"]` so servers that don't understand zaps see a like instead.
+- **Mute list sync** (NIP-51 kind 10000) propagates mutes to Bluesky and ActivityPub. When you mute someone on Nostr, they're muted on Bluesky and blocked on the Fediverse.
 - Bluesky is polled every 30 seconds for new notifications and timeline posts. The poller paginates automatically on catch-up after a restart, so no posts are missed.
 - The bridge stores AT URIs in the same database table as ActivityPub IDs, so likes/reposts/deletes and reply threading can be correctly linked.
 - Replying from Nostr to a bridged Bluesky reply will thread correctly back into the Bluesky conversation.
+- All bridged posts include an `r`-tag with the original post URL for "View Original" links in Nostr clients.
 
 ---
 

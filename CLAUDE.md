@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 go build ./cmd/klistr          # Build binary
-go test ./...                  # Run all tests (no tests currently exist)
+go test ./...                  # Run all tests
 go test ./internal/ap/...      # Run tests in a specific package
 go build -ldflags="-w -s" ./cmd/klistr  # Production build (smaller binary)
 docker compose up -d           # Run with Docker
@@ -108,7 +108,7 @@ Worker Pool → Claim → Deliver → Complete | Fail+Retry | Dead-Letter
 - **`internal/outbox/`** — Persistent delivery queue with at-least-once semantics. `Queue` manages the `outbox` table (enqueue, claim, complete, fail, dead-letter, cleanup). `WorkerPool` runs per-dest-type goroutines that drain the queue. `EnqueueAdapter` implements the enqueuer interfaces for AP/Relay/Bluesky integration.
 - **`internal/nostr/`** — Nostr protocol handling:
   - `signer.go` — `Signer`: dual signing — `SignAsUser` uses the real private key; `Sign(event, apID)` derives a deterministic key via `SHA-256(localPrivKey + ":" + apActorID)`. Derived keys cached with `sync.RWMutex`. Also provides `CreateDMToSelf()` (NIP-04 encrypted kind-4 event) for follower notifications.
-  - `relay.go` — `RelayPool`: subscribes to a single author's events (kinds 0,1,3,5,6,7,9735,10000) with author filter. Auto-reconnects with 5s backoff. Supports dynamic relay list changes via `AddRelay`/`RemoveRelay`; sends on a `restartCh` channel to cancel and immediately re-subscribe with the new list (no 5s delay). `Publisher`: publishes events to write relays with per-relay circuit breaker (`relayCircuit`, threshold=3 failures → open for 5 min, half-open auto-retry). Skips open circuits silently after logging "circuit opened" once; logs "relay recovered" on success. `RelayStatus` type exported for admin UI. `AddRelay`/`RemoveRelay`/`Relays()`/`RelayStatuses()`/`ResetCircuit()` methods.
+  - `relay.go` — `RelayPool`: subscribes to a single author's events (kinds 0,1,3,5,6,7,1068,9735,10000,10002,30023) with author filter. Auto-reconnects with 5s backoff. Supports dynamic relay list changes via `AddRelay`/`RemoveRelay`; sends on a `restartCh` channel to cancel and immediately re-subscribe with the new list (no 5s delay). `Publisher`: publishes events to write relays with per-relay circuit breaker (`relayCircuit`, threshold=3 failures → open for 5 min, half-open auto-retry). Skips open circuits silently after logging "circuit opened" once; logs "relay recovered" on success. `RelayStatus` type exported for admin UI. `AddRelay`/`RemoveRelay`/`Relays()`/`RelayStatuses()`/`ResetCircuit()` methods.
   - `handler.go` — `Handler`: processes Nostr events. Skips events with `proxy` tag (`IsProxyEvent()`). Optionally mirrors to Bluesky via `BskyPoster` interface. `FollowStore` interface uses `GetAPFollowing` (not `GetFollowing`) so Bluesky `bsky:<did>` entries in the `follows` table do not trigger spurious AP Undo Follow activities when kind-3 is processed. `handleKind10000` for NIP-51 mute list sync: extracts p-tag muted pubkeys, diffs against stored state, propagates adds as AP Block + Bluesky muteActor, removes as Undo(Block) + unmuteActor.
 - **`internal/server/`** — Chi-based HTTP server. Endpoints:
   - `/.well-known/webfinger`, `/.well-known/host-meta`, `/.well-known/nodeinfo`, `/.well-known/nostr.json` (NIP-05)
@@ -156,7 +156,7 @@ Several events trigger a NIP-04 encrypted kind-4 DM to the local user's own pubk
 
 ```
 module github.com/klppl/klistr
-go 1.23.1
+go 1.24.0
 ```
 
 Key dependencies: `go-chi/chi` (HTTP router), `nbd-wtf/go-nostr` (Nostr protocol, includes NIP-04), `modernc.org/sqlite` (pure-Go SQLite, no CGO), `go-fed/httpsig` (HTTP Signatures for AP), `lib/pq` (PostgreSQL driver).

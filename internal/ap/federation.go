@@ -11,6 +11,13 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Enqueuer is an optional interface for persisting outbound deliveries.
+// When set on the Federator, activities are enqueued for later delivery
+// by a worker pool instead of being delivered inline.
+type Enqueuer interface {
+	EnqueueAP(destURL, payload string, priority int, sourceEventID string) error
+}
+
 // Federator handles outbound federation of AP activities.
 type Federator struct {
 	LocalDomain string
@@ -20,6 +27,9 @@ type Federator struct {
 	GetFollowers func(actorURL string) ([]string, error)
 	// Concurrency caps simultaneous outbound HTTP requests. 0 uses the package default (10).
 	Concurrency int
+	// Enqueuer, when non-nil, routes deliveries through the outbox queue
+	// instead of performing inline HTTP POSTs.
+	Enqueuer Enqueuer
 	// perHostLimiter holds per-origin *rate.Limiter values (keyed by origin string).
 	perHostLimiter sync.Map
 }
@@ -67,6 +77,26 @@ func (f *Federator) Federate(ctx context.Context, activity map[string]interface{
 		"type", activityType,
 		"inboxes", len(inboxes),
 	)
+
+	if f.Enqueuer != nil {
+		payloadBytes, err := json.Marshal(activity)
+		if err != nil {
+			slog.Warn("federation: failed to marshal activity", "id", id, "error", err)
+			return
+		}
+		payload := string(payloadBytes)
+		for inbox := range inboxes {
+			if err := f.Enqueuer.EnqueueAP(inbox, payload, f.priorityFor(activityType), id); err != nil {
+				slog.Warn("federation: failed to enqueue", "inbox", inbox, "error", err)
+			}
+		}
+		slog.Debug("federation enqueued",
+			"id", id,
+			"type", activityType,
+			"inboxes", len(inboxes),
+		)
+		return
+	}
 
 	// Deliver to all inboxes in parallel, bounded to avoid overwhelming remote
 	// servers and exhausting local resources during large fan-outs.
@@ -236,6 +266,18 @@ func ActivityToMap(v interface{}) map[string]interface{} {
 	_ = json.Unmarshal(data, &m)
 	m["@context"] = DefaultContext
 	return m
+}
+
+// priorityFor returns the outbox priority for an activity type.
+func (f *Federator) priorityFor(activityType string) int {
+	switch activityType {
+	case "Like", "EmojiReact", "Announce", "Delete", "Follow", "Undo":
+		return 0 // real-time
+	case "Update":
+		return 2 // background
+	default:
+		return 1 // normal (Create, etc.)
+	}
 }
 
 func extractOrigin(rawURL string) string {

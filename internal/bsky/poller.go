@@ -324,11 +324,21 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 		RootEventID:    rootID,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
+		ContentWarning: extractContentWarning(record),
 		SourceURL:      atURIToHTTPS(post.URI),
 		ShowSourceLink: p.ShowSourceLink.Load(),
 		ProxyID:        post.URI,
 		ProxyProtocol:  "atproto",
 	}
+
+	// Resolve mention facets → Nostr p-tags via deterministic key derivation.
+	for _, did := range extractMentionDIDs(record) {
+		tmpEvent := &nostr.Event{}
+		if err := p.Signer.Sign(tmpEvent, did); err == nil {
+			np.MentionPubkeys = append(np.MentionPubkeys, tmpEvent.PubKey)
+		}
+	}
+
 	event := bridge.BuildKind1Event(np)
 
 	// Publish a kind-0 for the author so clients can display their profile.
@@ -524,11 +534,21 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		RootEventID:    rootNostrID,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
+		ContentWarning: extractContentWarning(record),
 		SourceURL:      atURIToHTTPS(n.URI),
 		ShowSourceLink: p.ShowSourceLink.Load(),
 		ProxyID:        n.URI,
 		ProxyProtocol:  "atproto",
 	}
+
+	// Resolve mention facets → Nostr p-tags via deterministic key derivation.
+	for _, did := range extractMentionDIDs(record) {
+		tmpEvent := &nostr.Event{}
+		if err := p.Signer.Sign(tmpEvent, did); err == nil {
+			np.MentionPubkeys = append(np.MentionPubkeys, tmpEvent.PubKey)
+		}
+	}
+
 	event := bridge.BuildKind1Event(np)
 
 	// Sign with a derived key for the Bluesky author's DID, giving them a
@@ -649,6 +669,61 @@ func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayN
 // publishBskyAuthorProfile is a convenience wrapper used by the notification path.
 func (p *Poller) publishBskyAuthorProfile(ctx context.Context, n *Notification) {
 	p.publishAuthorProfile(ctx, n.Author.DID, n.Author.Handle, n.Author.DisplayName)
+}
+
+// extractContentWarning returns a content warning label value from a Bluesky
+// post record's self-labels block. Returns empty string if no CW label is found.
+func extractContentWarning(record map[string]interface{}) string {
+	labels, ok := record["labels"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	values, ok := labels["values"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, v := range values {
+		if m, ok := v.(map[string]interface{}); ok {
+			if val, _ := m["val"].(string); val == "!warn" || val == "sexual" || val == "nudity" || val == "graphic-media" {
+				return val
+			}
+		}
+	}
+	return ""
+}
+
+// extractMentionDIDs returns the unique DIDs from mention facets in a Bluesky
+// post record. These are used to add p-tags (mentions) to the bridged Nostr event.
+func extractMentionDIDs(record map[string]interface{}) []string {
+	facets, ok := record["facets"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var dids []string
+	seen := make(map[string]bool)
+	for _, f := range facets {
+		fm, ok := f.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		features, ok := fm["features"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, feat := range features {
+			featMap, ok := feat.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if t, _ := featMap["$type"].(string); t == "app.bsky.richtext.facet#mention" {
+				if did, _ := featMap["did"].(string); did != "" && !seen[did] {
+					dids = append(dids, did)
+					seen[did] = true
+				}
+			}
+		}
+	}
+	return dids
 }
 
 // sendDMNotification delivers a Bluesky interaction as a NIP-04 self-DM.

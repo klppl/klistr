@@ -3,10 +3,12 @@ package bsky
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/rivo/uniseg"
 
 	"github.com/klppl/klistr/internal/bridge"
@@ -52,8 +54,8 @@ func NostrNoteToFeedPost(event *nostr.Event, externalBaseURL string, getATURI fu
 		Langs:     []string{"en"},
 	}
 
-	// Build facets for URLs and hashtags.
-	post.Facets = buildFacets(text)
+	// Build facets for URLs, hashtags, and nostr:npub mentions.
+	post.Facets = buildFacets(text, nil)
 
 	// Resolve reply threading via e-tags.
 	if getATURI != nil {
@@ -128,9 +130,12 @@ func buildReply(event *nostr.Event, getATURI func(string) (string, bool)) *Reply
 	}
 }
 
-// buildFacets scans text for URLs and hashtags and returns rich-text facets.
-// Byte offsets are computed over the UTF-8 encoded text, as required by AT Protocol.
-func buildFacets(text string) []Facet {
+// buildFacets scans text for URLs, hashtags, and nostr:npub mentions and
+// returns rich-text facets. Byte offsets are computed over the UTF-8 encoded
+// text, as required by AT Protocol.
+// resolveDID is an optional callback that maps a Nostr hex pubkey to a Bluesky
+// DID for mention facets. Pass nil to skip npub mention resolution.
+func buildFacets(text string, resolveDID func(pubkey string) (string, bool)) []Facet {
 	var facets []Facet
 
 	// URLs.
@@ -164,6 +169,31 @@ func buildFacets(text string) []Facet {
 				Tag:  tagName,
 			}},
 		})
+	}
+
+	// nostr:npub mentions → Bluesky mention facets.
+	if resolveDID != nil {
+		npubRe := regexp.MustCompile(`nostr:npub1[a-z0-9]+`)
+		for _, loc := range npubRe.FindAllStringIndex(text, -1) {
+			bech32 := text[loc[0]+6 : loc[1]] // strip "nostr:" prefix
+			prefix, val, err := nip19.Decode(bech32)
+			if err != nil || prefix != "npub" {
+				continue
+			}
+			pubkey, _ := val.(string)
+			if pubkey == "" {
+				continue
+			}
+			if did, ok := resolveDID(pubkey); ok {
+				facets = append(facets, Facet{
+					Index: ByteSlice{ByteStart: loc[0], ByteEnd: loc[1]},
+					Features: []FacetFeature{{
+						Type: "app.bsky.richtext.facet#mention",
+						DID:  did,
+					}},
+				})
+			}
+		}
 	}
 
 	return facets
@@ -553,4 +583,71 @@ func CollectionFromURI(uri string) string {
 		return ""
 	}
 	return parts[1]
+}
+
+// ─── Nostr → Bluesky helpers ────────────────────────────────────────────────
+
+// imetaInfo holds parsed NIP-94 imeta tag fields for outbound image uploads.
+type imetaInfo struct {
+	URL      string
+	Alt      string
+	MimeType string
+	Width    int
+	Height   int
+}
+
+// ExtractImetaTags parses NIP-94 imeta tags from a Nostr event.
+func ExtractImetaTags(event *nostr.Event, maxImages int) []imetaInfo {
+	var result []imetaInfo
+	for _, tag := range event.Tags {
+		if len(tag) < 2 || tag[0] != "imeta" {
+			continue
+		}
+		info := parseImetaFields(tag[1:])
+		if info.URL != "" {
+			result = append(result, info)
+			if len(result) >= maxImages {
+				break
+			}
+		}
+	}
+	return result
+}
+
+func parseImetaFields(fields []string) imetaInfo {
+	var info imetaInfo
+	for _, field := range fields {
+		parts := strings.SplitN(field, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch parts[0] {
+		case "url":
+			info.URL = parts[1]
+		case "alt":
+			info.Alt = parts[1]
+		case "m":
+			info.MimeType = parts[1]
+		case "dim":
+			if wh := strings.SplitN(parts[1], "x", 2); len(wh) == 2 {
+				info.Width, _ = strconv.Atoi(wh[0])
+				info.Height, _ = strconv.Atoi(wh[1])
+			}
+		}
+	}
+	return info
+}
+
+// BuildSelfLabels returns a SelfLabels struct if the Nostr event has a
+// content-warning tag, mapping it to a Bluesky "!warn" self-label.
+func BuildSelfLabels(event *nostr.Event) *SelfLabels {
+	for _, tag := range event.Tags {
+		if len(tag) >= 1 && tag[0] == "content-warning" {
+			return &SelfLabels{
+				Type:   "com.atproto.label.defs#selfLabels",
+				Values: []SelfLabel{{Val: "!warn"}},
+			}
+		}
+	}
+	return nil
 }

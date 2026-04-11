@@ -124,9 +124,14 @@ func BuildKind1Event(post NormalizedPost) *nostr.Event {
 		content += "\n\n" + img.URL
 	}
 
-	// Source link attribution: full URL appended to content and stored in r-tag.
-	if post.ShowSourceLink && post.SourceURL != "" && !strings.Contains(content, post.SourceURL) {
+	// "View Original" r-tag: always present so Nostr clients can offer a
+	// link back to the source post regardless of the ShowSourceLink setting.
+	if post.SourceURL != "" {
 		tags = append(tags, nostr.Tag{"r", post.SourceURL})
+	}
+
+	// Source link attribution: append human-visible link to content when enabled.
+	if post.ShowSourceLink && post.SourceURL != "" && !strings.Contains(content, post.SourceURL) {
 		content += "\n\n🔗 " + post.SourceURL
 	}
 

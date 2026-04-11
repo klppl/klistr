@@ -327,10 +327,18 @@ func ToZap(event *nostr.Event, tc *TransmuteContext) map[string]interface{} {
 		}
 	}
 
+	// Extract bolt11 invoice from event tags.
+	var bolt11 string
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "bolt11" {
+			bolt11 = tag[1]
+		}
+	}
+
 	act := map[string]interface{}{
 		"@context": DefaultContext,
 		"id":       tc.objectURL(event.ID),
-		"type":     "Zap",
+		"type":     []string{"Zap", "Like"},
 		"actor":    tc.LocalActorURL,
 		"object":   tc.objectURL(reactedID),
 		"to":       []string{PublicURI},
@@ -339,6 +347,15 @@ func ToZap(event *nostr.Event, tc *TransmuteContext) map[string]interface{} {
 	}
 	if content != "" {
 		act["content"] = content
+	}
+	if amountMsats > 0 {
+		act["amount"] = map[string]interface{}{
+			"value":    amountMsats,
+			"currency": "millisatoshi",
+		}
+	}
+	if bolt11 != "" {
+		act["bolt11"] = bolt11
 	}
 	return act
 }

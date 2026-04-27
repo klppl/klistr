@@ -365,12 +365,16 @@ func main() {
 	nostrHandler.RelayUpdater = relayMgr
 
 	// ─── Outbox Worker Pool ──────────────────────────────────────────────────
+	// PollInterval is just the fallback for retried items whose next_retry_at
+	// lies in the future. New enqueues wake workers instantly via Notifier
+	// (set below), so we don't need an aggressive poll cadence.
 	workerPool := outbox.NewWorkerPool(outboxQueue, outbox.WorkerPoolConfig{
 		APWorkers:    2,
 		RelayWorkers: 1,
 		BskyWorkers:  1,
-		PollInterval: 500 * time.Millisecond,
+		PollInterval: 5 * time.Second,
 	})
+	enqueuer.Notifier = workerPool
 
 	// AP delivery worker: deserializes payload and calls DeliverActivity.
 	workerPool.RegisterDeliverer("ap", func(ctx context.Context, item outbox.Item) error {

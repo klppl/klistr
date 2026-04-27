@@ -3,8 +3,19 @@ package outbox
 // EnqueueAdapter implements the enqueuer interfaces expected by the AP
 // Federator, Nostr Publisher, and Bluesky Poster. It wraps a Queue and
 // delegates to Enqueue with the appropriate dest_type.
+//
+// When Notifier is set, the matching worker is woken immediately after a
+// successful enqueue so it can drain the queue without waiting for the
+// fallback poll tick.
 type EnqueueAdapter struct {
-	Queue *Queue
+	Queue    *Queue
+	Notifier Notifier
+}
+
+func (e *EnqueueAdapter) wake(destType string) {
+	if e.Notifier != nil {
+		e.Notifier.Notify(destType)
+	}
 }
 
 // EnqueueAP satisfies ap.Enqueuer.
@@ -16,6 +27,9 @@ func (e *EnqueueAdapter) EnqueueAP(destURL, payload string, priority int, source
 		Priority:      priority,
 		SourceEventID: sourceEventID,
 	})
+	if err == nil {
+		e.wake("ap")
+	}
 	return err
 }
 
@@ -28,6 +42,9 @@ func (e *EnqueueAdapter) EnqueueRelay(destURL, payload string, priority int, sou
 		Priority:      priority,
 		SourceEventID: sourceEventID,
 	})
+	if err == nil {
+		e.wake("relay")
+	}
 	return err
 }
 
@@ -40,5 +57,8 @@ func (e *EnqueueAdapter) EnqueueBsky(destURL, payload string, priority int, sour
 		Priority:      priority,
 		SourceEventID: sourceEventID,
 	})
+	if err == nil {
+		e.wake("bsky")
+	}
 	return err
 }

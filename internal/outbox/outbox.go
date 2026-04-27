@@ -124,16 +124,40 @@ func (q *Queue) Enqueue(item Item) (int64, error) {
 // Claim atomically selects the highest-priority pending item for the given
 // dest_type whose next_retry_at has passed, and marks it as claimed.
 // Returns (item, true, nil) on success, (zero, false, nil) if nothing to claim.
+//
+// The idle path (most polls in steady state) is a single non-transactional
+// SELECT — no BEGIN/COMMIT, no ROLLBACK. Only when a candidate exists do we
+// take the transaction cost.
 func (q *Queue) Claim(destType string) (Item, bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// ── Probe (no tx). The vast majority of polls hit this with ErrNoRows. ──
+	var probeQ string
+	if q.driver == "sqlite" {
+		probeQ = `SELECT id FROM outbox
+			WHERE status = 'pending' AND dest_type = ? AND next_retry_at <= ?
+			ORDER BY priority, next_retry_at LIMIT 1`
+	} else {
+		probeQ = `SELECT id FROM outbox
+			WHERE status = 'pending' AND dest_type = $1 AND next_retry_at <= $2
+			ORDER BY priority, next_retry_at LIMIT 1`
+	}
+	var probeID int64
+	err := q.db.QueryRow(probeQ, destType, now).Scan(&probeID)
+	if err == sql.ErrNoRows {
+		return Item{}, false, nil
+	}
+	if err != nil {
+		return Item{}, false, fmt.Errorf("outbox claim probe: %w", err)
+	}
+
+	// ── A candidate exists. Atomically claim under a transaction. ──
 	tx, err := q.db.Begin()
 	if err != nil {
 		return Item{}, false, err
 	}
 	defer tx.Rollback()
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	// Find the best candidate.
 	var selectQ string
 	if q.driver == "sqlite" {
 		selectQ = `SELECT id FROM outbox
@@ -149,13 +173,13 @@ func (q *Queue) Claim(destType string) (Item, bool, error) {
 	var id int64
 	err = tx.QueryRow(selectQ, destType, now).Scan(&id)
 	if err == sql.ErrNoRows {
+		// Another worker claimed it between our probe and the tx — nothing to do.
 		return Item{}, false, nil
 	}
 	if err != nil {
 		return Item{}, false, fmt.Errorf("outbox claim select: %w", err)
 	}
 
-	// Mark as claimed.
 	var updateQ string
 	if q.driver == "sqlite" {
 		updateQ = `UPDATE outbox SET status = 'claimed' WHERE id = ?`

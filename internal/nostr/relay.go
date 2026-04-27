@@ -408,13 +408,21 @@ func (p *Publisher) ResetCircuit(url string) {
 }
 
 // getCircuit returns or creates a circuit breaker for the given relay URL.
+// Fast path: read lock when the circuit already exists (the common case for
+// configured relays). Falls back to the write lock only on first sighting.
 func (p *Publisher) getCircuit(url string) *relayCircuit {
+	p.mu.RLock()
+	cb, ok := p.circuits[url]
+	p.mu.RUnlock()
+	if ok {
+		return cb
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if cb, ok := p.circuits[url]; ok {
 		return cb
 	}
-	cb := &relayCircuit{}
+	cb = &relayCircuit{}
 	p.circuits[url] = cb
 	return cb
 }

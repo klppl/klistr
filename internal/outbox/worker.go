@@ -21,7 +21,18 @@ type WorkerPoolConfig struct {
 	APWorkers    int
 	RelayWorkers int
 	BskyWorkers  int
+	// PollInterval is the fallback poll period used when no wake-up signal
+	// arrives. With Notifier wiring (see EnqueueAdapter), workers wake
+	// immediately on Enqueue, so this only matters for picking up items whose
+	// next_retry_at falls in the future (delayed retries).
 	PollInterval time.Duration
+}
+
+// Notifier is the wake-up surface implemented by WorkerPool. EnqueueAdapter
+// calls Notify after a successful Enqueue so the matching worker wakes
+// immediately instead of waiting for the fallback poll tick.
+type Notifier interface {
+	Notify(destType string)
 }
 
 // WorkerPool drains the outbox queue with per-dest-type worker goroutines.
@@ -30,17 +41,26 @@ type WorkerPool struct {
 	config     WorkerPoolConfig
 	deliverers map[string]DeliverFunc
 	mu         sync.RWMutex
+
+	// notify holds a buffered (cap=1) wake-up channel per dest_type.
+	// Pre-populated for "ap", "relay", "bsky" so Notify is safe before Start.
+	notify map[string]chan struct{}
 }
 
 // NewWorkerPool creates a new worker pool.
 func NewWorkerPool(queue *Queue, config WorkerPoolConfig) *WorkerPool {
 	if config.PollInterval == 0 {
-		config.PollInterval = 100 * time.Millisecond
+		config.PollInterval = 5 * time.Second
 	}
 	return &WorkerPool{
 		queue:      queue,
 		config:     config,
 		deliverers: make(map[string]DeliverFunc),
+		notify: map[string]chan struct{}{
+			"ap":    make(chan struct{}, 1),
+			"relay": make(chan struct{}, 1),
+			"bsky":  make(chan struct{}, 1),
+		},
 	}
 }
 
@@ -49,6 +69,21 @@ func (wp *WorkerPool) RegisterDeliverer(destType string, fn DeliverFunc) {
 	wp.mu.Lock()
 	defer wp.mu.Unlock()
 	wp.deliverers[destType] = fn
+}
+
+// Notify wakes up any sleeping workers for destType so they re-poll the queue
+// immediately. Safe to call from any goroutine; non-blocking.
+func (wp *WorkerPool) Notify(destType string) {
+	wp.mu.RLock()
+	ch := wp.notify[destType]
+	wp.mu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 // Start launches all worker goroutines. Non-blocking — returns immediately.
@@ -69,26 +104,43 @@ func (wp *WorkerPool) runWorker(ctx context.Context, destType string, workerID i
 	slog.Debug("outbox worker started", "dest_type", destType, "worker", workerID)
 	defer slog.Debug("outbox worker stopped", "dest_type", destType, "worker", workerID)
 
+	wp.mu.RLock()
+	notify := wp.notify[destType]
+	wp.mu.RUnlock()
+
+	ticker := time.NewTicker(wp.config.PollInterval)
+	defer ticker.Stop()
+
 	for {
+		// Drain all available work without sleeping. Claim is now cheap when
+		// the queue is empty (single non-tx SELECT) so this loop exits fast.
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			item, ok, err := wp.queue.Claim(destType)
+			if err != nil {
+				// SQLITE_BUSY is expected contention with multiple workers — not actionable.
+				slog.Debug("outbox claim contention", "dest_type", destType, "error", err)
+				break
+			}
+			if !ok {
+				break
+			}
+
+			wp.deliver(ctx, item)
+		}
+
+		// Sleep until notified or the fallback ticker fires.
 		select {
 		case <-ctx.Done():
 			return
-		default:
+		case <-notify:
+		case <-ticker.C:
 		}
-
-		item, ok, err := wp.queue.Claim(destType)
-		if err != nil {
-			// SQLITE_BUSY is expected contention with multiple workers — not actionable.
-			slog.Debug("outbox claim contention", "dest_type", destType, "error", err)
-			wp.sleep(ctx)
-			continue
-		}
-		if !ok {
-			wp.sleep(ctx)
-			continue
-		}
-
-		wp.deliver(ctx, item)
 	}
 }
 
@@ -133,11 +185,4 @@ func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
 		"dest_url", item.DestURL,
 		"id", item.ID,
 	)
-}
-
-func (wp *WorkerPool) sleep(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(wp.config.PollInterval):
-	}
 }

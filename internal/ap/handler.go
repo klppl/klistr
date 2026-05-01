@@ -1013,12 +1013,12 @@ func (h *APHandler) handleMove(ctx context.Context, activity IncomingActivity) e
 		}
 	}
 
-	// Send AP Undo Follow to old actor + Follow to new actor in the background.
-	go func() {
-		bgCtx := context.Background()
-		h.Federator.Federate(bgCtx, BuildUndoFollow(h.LocalActorURL, oldActorURL))
-		h.Federator.Federate(bgCtx, BuildFollow(h.LocalActorURL, newActorURL))
-	}()
+	// Send AP Undo Follow to old actor + Follow to new actor.
+	// Federate handles enqueuing to the outbox; calling it synchronously ensures
+	// the activities are persisted before the handler returns.
+	bgCtx := context.Background()
+	h.Federator.Federate(bgCtx, BuildUndoFollow(h.LocalActorURL, oldActorURL))
+	h.Federator.Federate(bgCtx, BuildFollow(h.LocalActorURL, newActorURL))
 
 	// Notify local user.
 	go h.sendMoveNotification(context.Background(), oldActorURL, newActorURL)

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -29,6 +30,8 @@ type RelayManager interface {
 	RemoveRelay(url string) bool
 	// ResetCircuit clears the circuit-breaker failure state for a relay.
 	ResetCircuit(url string)
+	// ResetCircuitWithRetry clears the circuit-breaker and retries dead letters for the relay.
+	ResetCircuitWithRetry(url string) (int64, error)
 	// TestRelay attempts to establish a WebSocket connection to the relay.
 	TestRelay(ctx context.Context, url string) error
 }
@@ -146,7 +149,10 @@ func (s *Server) handleResetRelayCircuit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	url := strings.TrimSpace(req.URL)
-	s.relayManager.ResetCircuit(url)
-	s.auditLog("relay_circuit_reset", url)
-	jsonResponse(w, map[string]interface{}{"ok": true, "url": url}, http.StatusOK)
+	retried, err := s.relayManager.ResetCircuitWithRetry(url)
+	if err != nil {
+		slog.Warn("relay circuit reset: failed to retry dead letters", "relay", url, "error", err)
+	}
+	s.auditLog("relay_circuit_reset", fmt.Sprintf("%s (retried %d dead letters)", url, retried))
+	jsonResponse(w, map[string]interface{}{"ok": true, "url": url, "retried": retried}, http.StatusOK)
 }

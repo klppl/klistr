@@ -343,6 +343,23 @@ func (q *Queue) RetryDead(id int64) error {
 	return nil
 }
 
+// RetryDeadForDest resets all dead-lettered items for the given destination
+// URL back to pending with zero attempts. Returns the number of items reset.
+func (q *Queue) RetryDeadForDest(destURL string) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var query string
+	if q.driver == "sqlite" {
+		query = `UPDATE outbox SET status = 'pending', attempts = 0, next_retry_at = ? WHERE dest_url = ? AND status = 'dead'`
+	} else {
+		query = `UPDATE outbox SET status = 'pending', attempts = 0, next_retry_at = $1 WHERE dest_url = $2 AND status = 'dead'`
+	}
+	result, err := q.db.Exec(query, now, destURL)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // Cleanup removes old completed and dead items. Returns total rows removed.
 func (q *Queue) Cleanup(doneTTL, deadTTL time.Duration) (int64, error) {
 	doneCutoff := time.Now().UTC().Add(-doneTTL).Format(time.RFC3339Nano)

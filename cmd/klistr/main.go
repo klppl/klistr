@@ -43,6 +43,7 @@ type relayManagerAdapter struct {
 	publisher *nostrpkg.Publisher
 	pool      *nostrpkg.RelayPool
 	store     *db.Store
+	queue     *outbox.Queue
 }
 
 func (a *relayManagerAdapter) Relays() []string { return a.publisher.Relays() }
@@ -80,6 +81,14 @@ func (a *relayManagerAdapter) RemoveRelay(url string) bool {
 }
 
 func (a *relayManagerAdapter) ResetCircuit(url string) { a.publisher.ResetCircuit(url) }
+
+func (a *relayManagerAdapter) ResetCircuitWithRetry(url string) (int64, error) {
+	a.publisher.ResetCircuit(url)
+	if a.queue != nil {
+		return a.queue.RetryDeadForDest(url)
+	}
+	return 0, nil
+}
 
 func (a *relayManagerAdapter) TestRelay(ctx context.Context, url string) error {
 	tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -361,7 +370,7 @@ func main() {
 
 	// Wire relay manager now that pool exists. Shared between nostrHandler (kind-10002
 	// inbound relay list sync) and the HTTP server (admin UI relay management).
-	relayMgr := &relayManagerAdapter{publisher: publisher, pool: pool, store: store}
+	relayMgr := &relayManagerAdapter{publisher: publisher, pool: pool, store: store, queue: outboxQueue}
 	nostrHandler.RelayUpdater = relayMgr
 
 	// ─── Outbox Worker Pool ──────────────────────────────────────────────────

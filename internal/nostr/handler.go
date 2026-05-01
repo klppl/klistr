@@ -108,7 +108,11 @@ func (h *Handler) Handle(ctx context.Context, event *nostr.Event) {
 	// Mirror to Bluesky if bridge is configured.
 	if h.BskyPoster != nil {
 		go func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("panic in bsky mirror handler", "panic", r, "id", event.ID)
+				}
+			}()
 			h.BskyPoster.Handle(ctx, event)
 		}()
 	}
@@ -275,16 +279,25 @@ func (h *Handler) handleKind10000(ctx context.Context, event *nostr.Event) {
 
 	// 5. Propagate new mutes.
 	for _, pk := range newMutes {
+		apResolved := false
 		if actorURL, ok := h.resolveMuteAPActor(pk); ok {
 			block := ap.ToBlock(actorURL, h.TC)
 			h.Federator.Federate(ctx, block)
+			apResolved = true
 		}
+		
+		bskyResolved := false
 		if h.BskyMuter != nil {
 			if did, ok := h.resolveBskyDID(pk); ok {
 				if err := h.BskyMuter.MuteActor(ctx, did); err != nil {
 					slog.Warn("mute: bsky mute failed", "did", did, "error", err)
 				}
+				bskyResolved = true
 			}
+		}
+
+		if !apResolved && !bskyResolved {
+			slog.Debug("mute: could not resolve pubkey to AP actor or Bsky DID", "pubkey", pk)
 		}
 	}
 
@@ -385,7 +398,7 @@ func (h *Handler) handleKind3(ctx context.Context, event *nostr.Event) {
 		}
 		slog.Info("kind3: following AP actor", "actor", apURL)
 		follow := ap.BuildFollow(localActorURL, apURL)
-		go h.Federator.Federate(ctx, follow)
+		h.Federator.Federate(ctx, follow)
 		if err := h.Store.AddFollow(localActorURL, apURL); err != nil {
 			slog.Warn("kind3: failed to store follow", "actor", apURL, "error", err)
 		}
@@ -398,7 +411,7 @@ func (h *Handler) handleKind3(ctx context.Context, event *nostr.Event) {
 		}
 		slog.Info("kind3: unfollowing AP actor", "actor", apURL)
 		undo := ap.BuildUndoFollow(localActorURL, apURL)
-		go h.Federator.Federate(ctx, undo)
+		h.Federator.Federate(ctx, undo)
 		if err := h.Store.RemoveFollow(localActorURL, apURL); err != nil {
 			slog.Warn("kind3: failed to remove follow", "actor", apURL, "error", err)
 		}

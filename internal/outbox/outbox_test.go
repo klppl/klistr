@@ -237,3 +237,24 @@ func TestRetryDead(t *testing.T) {
 		t.Errorf("after retry: attempts = %d, want 0", item.Attempts)
 	}
 }
+
+func TestKill(t *testing.T) {
+	q := testQueue(t)
+
+	id, _ := q.Enqueue(Item{DestType: "ap", DestURL: "https://a.com", Payload: "{}", MaxAttempts: 5})
+	err := q.Kill(id, "permanent rejection")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	item, _ := q.Get(id)
+	if item.Status != StatusDead {
+		t.Errorf("status = %q, want dead", item.Status)
+	}
+	if item.Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", item.Attempts)
+	}
+	if item.LastError != "permanent rejection" {
+		t.Errorf("last_error = %q, want 'permanent rejection'", item.LastError)
+	}
+}

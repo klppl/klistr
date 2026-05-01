@@ -13,6 +13,11 @@ import (
 // logging a warning — the circuit will recover on its own.
 var ErrCircuitOpen = errors.New("circuit open")
 
+// ErrPermanentFailure is returned by delivery functions when a destination
+// returns a permanent rejection error (e.g. "kind X not allowed").
+// The worker dead-letters the item immediately without retrying.
+var ErrPermanentFailure = errors.New("permanent failure")
+
 // DeliverFunc is the signature for protocol-specific delivery logic.
 type DeliverFunc func(ctx context.Context, item Item) error
 
@@ -161,6 +166,18 @@ func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
 			// Circuit is open — reschedule silently without burning an attempt.
 			// The circuit breaker will recover on its own (5 min cooldown).
 			wp.queue.Reschedule(item.ID, 5*time.Minute)
+			return
+		}
+		if errors.Is(err, ErrPermanentFailure) {
+			slog.Warn("outbox permanent failure (dead-lettering)",
+				"dest_type", item.DestType,
+				"dest_url", item.DestURL,
+				"id", item.ID,
+				"error", err,
+			)
+			if killErr := wp.queue.Kill(item.ID, err.Error()); killErr != nil {
+				slog.Warn("outbox kill update error", "id", item.ID, "error", killErr)
+			}
 			return
 		}
 		slog.Warn("outbox delivery failed",

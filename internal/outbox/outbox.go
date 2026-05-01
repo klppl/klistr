@@ -260,6 +260,23 @@ func (q *Queue) Reschedule(id int64, delay time.Duration) error {
 	return err
 }
 
+// Kill marks an item as dead immediately (permanent failure).
+func (q *Queue) Kill(id int64, errMsg string) error {
+	item, err := q.Get(id)
+	if err != nil {
+		return err
+	}
+	newAttempts := item.Attempts + 1
+	var query string
+	if q.driver == "sqlite" {
+		query = `UPDATE outbox SET status = 'dead', attempts = ?, last_error = ? WHERE id = ?`
+	} else {
+		query = `UPDATE outbox SET status = 'dead', attempts = $1, last_error = $2 WHERE id = $3`
+	}
+	_, err = q.db.Exec(query, newAttempts, errMsg, id)
+	return err
+}
+
 // Get retrieves a single outbox item by ID.
 func (q *Queue) Get(id int64) (Item, error) {
 	var query string

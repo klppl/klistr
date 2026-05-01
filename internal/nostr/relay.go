@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,15 +43,15 @@ func SetCircuitBreakerThreshold(n int) {
 
 // relayCircuit is a per-relay circuit breaker.
 type relayCircuit struct {
-	mu            sync.Mutex
-	failCount     int
-	openedAt      time.Time
-	open          bool
-	permanentOpen bool // true when relay requires PoW; stays open until manual reset
+	mu              sync.Mutex
+	failCount       int
+	openedAt        time.Time
+	open            bool
+	permanentOpen   bool           // true when relay requires PoW; stays open until manual reset
+	restrictedKinds map[int]struct{} // kind -> exists
 }
 
 // isOpen returns true when the circuit is open (relay should be bypassed).
-// Resets to closed once cbCooldown has elapsed (half-open retry), unless permanentOpen is set.
 func (cb *relayCircuit) isOpen() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -66,6 +67,28 @@ func (cb *relayCircuit) isOpen() bool {
 		return false
 	}
 	return true
+}
+
+// isKindAllowed returns true if the given Nostr kind is NOT currently
+// known to be restricted by this relay.
+func (cb *relayCircuit) isKindAllowed(kind int) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.restrictedKinds == nil {
+		return true
+	}
+	_, restricted := cb.restrictedKinds[kind]
+	return !restricted
+}
+
+// recordKindRestriction marks a kind as restricted by this relay.
+func (cb *relayCircuit) recordKindRestriction(kind int) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.restrictedKinds == nil {
+		cb.restrictedKinds = make(map[int]struct{})
+	}
+	cb.restrictedKinds[kind] = struct{}{}
 }
 
 // openForPoW permanently opens the circuit for a relay that requires proof-of-work.
@@ -457,6 +480,10 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 			priority = 2
 		}
 		for _, url := range allRelays {
+			if !p.IsKindAllowed(url, event.Kind) {
+				slog.Debug("skipping relay: kind not allowed", "relay", url, "kind", event.Kind)
+				continue
+			}
 			if err := p.Enqueuer.EnqueueRelay(url, payload, priority, event.ID); err != nil {
 				slog.Warn("relay publish: failed to enqueue", "relay", url, "error", err)
 			}
@@ -558,6 +585,11 @@ func (p *Publisher) IsCircuitOpen(relayURL string) bool {
 	return p.getCircuit(relayURL).isOpen()
 }
 
+// IsKindAllowed returns true if the given relay is not known to restrict the kind.
+func (p *Publisher) IsKindAllowed(relayURL string, kind int) bool {
+	return p.getCircuit(relayURL).isKindAllowed(kind)
+}
+
 // RecordRelayResult updates the circuit breaker state for a relay after delivery.
 func (p *Publisher) RecordRelayResult(relayURL string, err error) {
 	cb := p.getCircuit(relayURL)
@@ -567,7 +599,29 @@ func (p *Publisher) RecordRelayResult(relayURL string, err error) {
 	}
 	if isPowRequired(err) {
 		cb.openForPoW()
-	} else if !isPolicyRejection(err) {
+		return
+	}
+
+	// Check if this is a "kind not allowed" policy rejection.
+	// Example: "msg: blocked: kind 1 is not allowed"
+	msg := err.Error()
+	if strings.Contains(msg, "blocked: kind") && strings.Contains(msg, "is not allowed") {
+		kind := -1
+		parts := strings.Fields(msg)
+		for i, part := range parts {
+			if part == "kind" && i+1 < len(parts) {
+				kind, _ = strconv.Atoi(parts[i+1])
+				break
+			}
+		}
+		if kind >= 0 {
+			slog.Info("relay restriction learned", "relay", relayURL, "restricted_kind", kind)
+			cb.recordKindRestriction(kind)
+			return
+		}
+	}
+
+	if !isPolicyRejection(err) {
 		cb.recordFailure()
 	}
 }

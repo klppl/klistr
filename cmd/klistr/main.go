@@ -404,11 +404,23 @@ func main() {
 		if err := json.Unmarshal([]byte(item.Payload), &event); err != nil {
 			return fmt.Errorf("unmarshal nostr event: %w", err)
 		}
+
+		// Fast-fail: if this relay is known to restrict this kind, dead-letter immediately.
+		if !publisher.IsKindAllowed(item.DestURL, event.Kind) {
+			return fmt.Errorf("%w: relay restricts kind %d", outbox.ErrPermanentFailure, event.Kind)
+		}
+
 		publishCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		for result := range publisher.GetPool().PublishMany(publishCtx, []string{item.DestURL}, event) {
 			publisher.RecordRelayResult(result.RelayURL, result.Error)
 			if result.Error != nil {
+				// If the error is a kind-restriction policy rejection, return permanent failure
+				// so the worker dead-letters it immediately instead of retrying.
+				msg := result.Error.Error()
+				if strings.Contains(msg, "blocked: kind") && strings.Contains(msg, "is not allowed") {
+					return fmt.Errorf("%w: %v", outbox.ErrPermanentFailure, result.Error)
+				}
 				return result.Error
 			}
 		}

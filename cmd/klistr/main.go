@@ -168,6 +168,10 @@ func main() {
 
 	// ─── Configuration ────────────────────────────────────────────────────────
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 	slog.Info("config loaded",
 		"domain", cfg.LocalDomain,
 		"relays", cfg.NostrRelays,
@@ -473,6 +477,28 @@ func main() {
 					slog.Warn("outbox cleanup error", "error", err)
 				} else if removed > 0 {
 					slog.Info("outbox cleanup", "removed", removed)
+				}
+			}
+		}
+	}()
+
+	// ─── Audit Log Cleanup ───────────────────────────────────────────────────
+	// Keep ~90 days of admin-action history; older rows are deleted daily so
+	// the audit_log table doesn't grow without bound on long-lived deployments.
+	go func() {
+		const auditLogRetention = 90 * 24 * time.Hour
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				removed, err := store.CleanupAuditLog(auditLogRetention)
+				if err != nil {
+					slog.Warn("audit log cleanup error", "error", err)
+				} else if removed > 0 {
+					slog.Info("audit log cleanup", "removed", removed)
 				}
 			}
 		}

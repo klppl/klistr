@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+
+	nostrpkg "github.com/klppl/klistr/internal/nostr"
 )
 
 // Config holds all runtime configuration loaded from environment variables.
@@ -128,6 +132,98 @@ func Load() *Config {
 		APFederationConcurrency: parseInt(os.Getenv("AP_FEDERATION_CONCURRENCY"), 10),
 		RelayCBThreshold:        parseInt(os.Getenv("RELAY_CB_THRESHOLD"), 3),
 	}
+}
+
+// Validate runs sanity checks on the loaded configuration. Fatal misconfigs
+// return an error; lesser issues (insecure-but-legal choices) are logged at
+// WARN level so the operator notices but the bridge still starts. This catches
+// the most common self-host setup mistakes at boot instead of as cryptic
+// runtime errors later.
+func (c *Config) Validate() error {
+	var errs []string
+	add := func(format string, args ...any) {
+		errs = append(errs, fmt.Sprintf(format, args...))
+	}
+
+	// LOCAL_DOMAIN must be a parseable absolute URL.
+	domainURL, err := url.Parse(c.LocalDomain)
+	if err != nil || domainURL.Host == "" || domainURL.Scheme == "" {
+		add("LOCAL_DOMAIN=%q is not a valid absolute URL (example: https://yourdomain.com)", c.LocalDomain)
+	} else if domainURL.Scheme != "https" && !isLoopbackHost(domainURL.Hostname()) {
+		// Non-loopback http:// is legal but a security smell — log a warning.
+		slog.Warn("LOCAL_DOMAIN uses http:// for non-localhost; AP federation typically requires https://",
+			"local_domain", c.LocalDomain)
+	}
+
+	// PORT must be numeric (the http server will fail to bind otherwise, but
+	// catching it here surfaces a clearer message).
+	if _, err := strconv.Atoi(c.Port); err != nil {
+		add("PORT=%q is not a number", c.Port)
+	}
+
+	// EXTERNAL_BASE_URL must parse (used to build njump.me / nostr-client URLs).
+	if _, err := url.Parse(c.ExternalBaseURL); err != nil {
+		add("EXTERNAL_BASE_URL=%q is not a valid URL", c.ExternalBaseURL)
+	}
+
+	// Each Nostr relay must pass the wss-only-or-loopback check applied
+	// everywhere else (admin UI, kind-10002, KV restore). Anything else gets
+	// rejected at use-time anyway — surfacing it at startup gives the operator
+	// the chance to fix NOSTR_RELAY before traffic starts flowing.
+	for _, relay := range c.NostrRelays {
+		if !nostrpkg.IsValidRelayURL(relay) {
+			add("NOSTR_RELAY entry %q is invalid (must be wss://; ws:// allowed only for localhost)", relay)
+		}
+	}
+
+	// Bluesky bridge: if enabled, PDS URL must be a valid https endpoint.
+	if c.BskyEnabled() {
+		pdsURL, err := url.Parse(c.BskyPDSURL)
+		if err != nil || pdsURL.Host == "" {
+			add("BSKY_PDS_URL=%q is not a valid URL", c.BskyPDSURL)
+		} else if pdsURL.Scheme != "https" && !isLoopbackHost(pdsURL.Hostname()) {
+			add("BSKY_PDS_URL=%q must be https:// (got %s)", c.BskyPDSURL, pdsURL.Scheme)
+		}
+	}
+
+	// ZapSplit must be a sane fraction. Out-of-range is almost certainly a
+	// misconfig (e.g. forgot to divide by 100).
+	if c.ZapSplit < 0 || c.ZapSplit > 1 {
+		add("ZAP_SPLIT=%v must be between 0 and 1 (got %v)", c.ZapSplit, c.ZapSplit)
+	}
+
+	// ZAP_PUBKEY, when set, must be 64-hex Nostr pubkey.
+	if c.ZapPubkey != "" {
+		if len(c.ZapPubkey) != 64 || !isHex(c.ZapPubkey) {
+			slog.Warn("ZAP_PUBKEY is not 64-hex; zap splits will fail",
+				"zap_pubkey_length", len(c.ZapPubkey))
+		}
+	}
+
+	// WEB_ADMIN password length: short passwords are a footgun for a
+	// publicly-exposed admin UI.
+	if c.WebAdminPassword != "" && len(c.WebAdminPassword) < 12 {
+		slog.Warn("WEB_ADMIN password is short; recommend at least 12 chars",
+			"length", len(c.WebAdminPassword))
+	}
+
+	if len(errs) > 0 {
+		return errors.New("config validation failed:\n  - " + strings.Join(errs, "\n  - "))
+	}
+	return nil
+}
+
+func isLoopbackHost(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // getEnvBool returns true if the env var is "true" or "1" (case-insensitive).

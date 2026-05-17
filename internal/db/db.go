@@ -430,6 +430,24 @@ type AuditLogEntry struct {
 	Detail    string `json:"detail"`
 }
 
+// CleanupAuditLog deletes audit_log rows older than maxAge. Used by a daily
+// goroutine in main.go to keep the table from growing without bound over
+// multi-year deployments. Returns the number of rows removed.
+func (s *Store) CleanupAuditLog(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339Nano)
+	var q string
+	if s.driver == "sqlite" {
+		q = `DELETE FROM audit_log WHERE ts < ?`
+	} else {
+		q = `DELETE FROM audit_log WHERE ts < $1`
+	}
+	result, err := s.db.Exec(q, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("audit log cleanup: %w", err)
+	}
+	return result.RowsAffected()
+}
+
 // WriteAuditLog appends a new entry to the audit log. It is a best-effort
 // call — the caller should log but not propagate any error.
 func (s *Store) WriteAuditLog(action, detail string) error {

@@ -192,7 +192,7 @@ func (h *Handler) handleKind10002(event *nostr.Event) {
 			continue
 		}
 		url := tag[1]
-		if url == "" || (!strings.HasPrefix(url, "wss://") && !strings.HasPrefix(url, "ws://")) {
+		if !IsValidRelayURL(url) {
 			continue
 		}
 		desired[url] = struct{}{}

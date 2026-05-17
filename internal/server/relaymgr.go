@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	nostrpkg "github.com/klppl/klistr/internal/nostr"
 )
 
 // RelayStatus describes a relay and its circuit-breaker state (used in the admin API response).
@@ -63,8 +65,8 @@ func (s *Server) handleAddRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	url := strings.TrimSpace(req.URL)
-	if !strings.HasPrefix(url, "wss://") && !strings.HasPrefix(url, "ws://") {
-		http.Error(w, "invalid relay URL: must start with wss:// or ws://", http.StatusBadRequest)
+	if !nostrpkg.IsValidRelayURL(url) {
+		http.Error(w, "invalid relay URL: must be wss:// (ws:// allowed only for localhost)", http.StatusBadRequest)
 		return
 	}
 	added := s.relayManager.AddRelay(url)

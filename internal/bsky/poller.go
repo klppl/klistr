@@ -175,17 +175,33 @@ func (p *Poller) pollNotifications(ctx context.Context) {
 	// Process oldest-first (collected newest-first above, so reverse).
 	slices.Reverse(allNew)
 
-	var newest string
+	// Track the timestamp of the latest contiguously-successful notification.
+	// A transient failure (publish/sign error) halts cursor advancement so the
+	// failed item — and everything after it — is retried on the next poll.
+	// Items already processed before the failure are not re-handled because
+	// each subsequent poll re-uses the persisted cursor as its lower bound.
+	var lastGood string
+	stalled := false
 	for i := range allNew {
 		n := &allNew[i]
-		p.handleNotification(ctx, n)
-		if n.IndexedAt > newest {
-			newest = n.IndexedAt
+		if stalled {
+			slog.Debug("bsky poller: deferring notification due to earlier transient failure",
+				"uri", n.URI, "indexedAt", n.IndexedAt)
+			continue
+		}
+		if !p.handleNotification(ctx, n) {
+			slog.Warn("bsky poller: notification deferred for retry",
+				"uri", n.URI, "indexedAt", n.IndexedAt)
+			stalled = true
+			continue
+		}
+		if n.IndexedAt > lastGood {
+			lastGood = n.IndexedAt
 		}
 	}
 
-	if newest != "" {
-		if err := p.Store.SetKV(kvLastSeenKey, newest); err != nil {
+	if lastGood != "" {
+		if err := p.Store.SetKV(kvLastSeenKey, lastGood); err != nil {
 			slog.Warn("bsky poller: failed to save last-seen timestamp", "error", err)
 		}
 	}
@@ -211,7 +227,11 @@ func (p *Poller) pollTimeline(ctx context.Context) {
 
 		hitOld := false
 		for _, item := range resp.Feed {
-			if lastSeen != "" && item.Post.IndexedAt <= lastSeen {
+			// Strict `<` rather than `<=` so posts sharing a second with the
+			// stored cursor aren't dropped. bridgePost() has its own idempotency
+			// guard via Store.GetNostrIDForObject(post.URI), so the at-most-once
+			// re-processing of the boundary post is harmless.
+			if lastSeen != "" && item.Post.IndexedAt < lastSeen {
 				hitOld = true
 				break
 			}
@@ -407,7 +427,11 @@ func (p *Poller) resolveReplyRefs(replyBlock map[string]interface{}) (parentNost
 }
 
 // handleNotification converts a single Bluesky notification to a Nostr event.
-func (p *Poller) handleNotification(ctx context.Context, n *Notification) {
+// Returns true if the notification was processed (including intentional skips
+// like loop-guard hits or unknown reason types). Returns false only on
+// transient publish/sign failures so the caller can leave the cursor behind
+// and retry on the next poll.
+func (p *Poller) handleNotification(ctx context.Context, n *Notification) bool {
 	slog.Debug("bsky poller: handling notification", "reason", n.Reason, "uri", n.URI, "author", n.Author.Handle)
 
 	switch n.Reason {
@@ -429,39 +453,42 @@ func (p *Poller) handleNotification(ctx context.Context, n *Notification) {
 		dm, err := p.Signer.CreateDMToSelf(msg)
 		if err != nil {
 			slog.Warn("bsky poller: create DM failed", "error", err)
-			return
+			return false
 		}
 		if err := p.Publisher.Publish(ctx, dm); err != nil {
 			slog.Warn("bsky poller: publish DM failed", "error", err)
+			return false
 		}
-		return
+		return true
 
 	case "like", "repost":
 		// Skip if this notification's URI belongs to content we bridged (loop guard).
 		if _, isBridged := p.Store.GetNostrIDForObject(n.URI); isBridged {
 			slog.Debug("bsky poller: skipping notification for bridged content", "uri", n.URI)
-			return
+			return true
 		}
 
 		event, err := NotificationToNostrEvent(n, p.LocalPubKey)
 		if err != nil {
+			// Transmute errors are permanent (malformed payload). Advance past.
 			slog.Warn("bsky poller: transmute failed", "reason", n.Reason, "error", err)
-			return
+			return true
 		}
 		if event == nil {
-			return
+			return true
 		}
 
 		if err := p.Signer.SignAsUser(event); err != nil {
 			slog.Warn("bsky poller: sign event failed", "error", err)
-			return
+			return false
 		}
 
 		if err := p.Publisher.Publish(ctx, event); err != nil {
 			slog.Warn("bsky poller: publish event failed", "error", err)
-			return
+			return false
 		}
 		slog.Info("bsky poller: published nostr event", "reason", n.Reason, "kind", event.Kind)
+		return true
 
 	case "reply":
 		// Try to thread the reply into the existing Nostr conversation.
@@ -469,14 +496,18 @@ func (p *Poller) handleNotification(ctx context.Context, n *Notification) {
 		// create a proper kind-1 reply signed with a derived key for the
 		// Bluesky author's DID (same mechanism as AP actor bridging).
 		// If the parent is not in the DB, drop silently — no DM notification.
-		p.bridgeReply(ctx, n)
+		// bridgeReply returns false on transient errors and on permanent drops;
+		// the dropTransient flag distinguishes them so we don't block the cursor
+		// on permanent drops.
+		return p.bridgeReply(ctx, n)
 
 	case "mention", "quote":
 		// No clear parent Nostr post to thread into; notify via DM.
-		p.sendDMNotification(ctx, n)
+		return p.sendDMNotification(ctx, n)
 
 	default:
-		// Unknown reason type; ignore.
+		// Unknown reason type; ignore (don't block the cursor).
+		return true
 	}
 }
 
@@ -484,12 +515,13 @@ func (p *Poller) handleNotification(ctx context.Context, n *Notification) {
 // event. It extracts the parent/root AT URIs from the reply record, looks up
 // their Nostr event IDs, and signs with a derived key for the Bluesky author's
 // DID so each author has a consistent pseudonymous Nostr identity.
-// Returns true if the reply was successfully bridged, false if it should fall
-// back to a DM notification.
+// Returns false only on transient sign/publish failures (so the caller can hold
+// the cursor and retry). Permanent drops (no parent URI, parent not bridgeable)
+// return true so the notification cursor advances past them.
 func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 	parentURI, rootURI := extractReplyRefs(n)
 	if parentURI == "" {
-		return false
+		return true // no parent to thread to — permanent drop, advance cursor
 	}
 
 	parentNostrID, ok := p.Store.GetNostrIDForObject(parentURI)
@@ -499,9 +531,9 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		p.ensureAncestorsBridged(ctx, parentURI)
 		parentNostrID, ok = p.Store.GetNostrIDForObject(parentURI)
 		if !ok {
-			slog.Debug("bsky poller: reply parent not bridged after ancestor fetch, falling back to DM",
+			slog.Debug("bsky poller: reply parent not bridged after ancestor fetch, dropping",
 				"parentURI", parentURI, "author", n.Author.Handle)
-			return false
+			return true // permanent drop — ancestor chain unrecoverable
 		}
 	}
 
@@ -727,17 +759,20 @@ func extractMentionDIDs(record map[string]interface{}) []string {
 }
 
 // sendDMNotification delivers a Bluesky interaction as a NIP-04 self-DM.
-func (p *Poller) sendDMNotification(ctx context.Context, n *Notification) {
+// Returns false on transient publish/sign failure so the cursor can be held.
+func (p *Poller) sendDMNotification(ctx context.Context, n *Notification) bool {
 	content := extractNotifText(n)
 	msg := fmt.Sprintf("💬 New Bluesky %s from @%s: %s\n%s",
 		n.Reason, n.Author.Handle, content, atURIToHTTPS(n.URI))
 	dm, err := p.Signer.CreateDMToSelf(msg)
 	if err != nil {
 		slog.Warn("bsky poller: create DM failed", "reason", n.Reason, "error", err)
-		return
+		return false
 	}
 	if err := p.Publisher.Publish(ctx, dm); err != nil {
 		slog.Warn("bsky poller: publish DM failed", "reason", n.Reason, "error", err)
+		return false
 	}
 	slog.Info("bsky poller: notified via DM", "reason", n.Reason, "author", n.Author.Handle)
+	return true
 }

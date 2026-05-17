@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,30 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"golang.org/x/time/rate"
 )
+
+// IsValidRelayURL reports whether u is acceptable for use as a Nostr relay
+// endpoint. wss:// is always accepted. ws:// is accepted only when the host is
+// a loopback address (localhost / 127.0.0.1 / ::1) so local-dev setups still
+// work, but plaintext relays on the public network are rejected.
+func IsValidRelayURL(u string) bool {
+	u = strings.TrimSpace(u)
+	if u == "" {
+		return false
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	switch parsed.Scheme {
+	case "wss":
+		return true
+	case "ws":
+		host := parsed.Hostname()
+		return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	default:
+		return false
+	}
+}
 
 // PublishEnqueuer is an optional interface for persisting outbound relay
 // deliveries via the outbox queue.

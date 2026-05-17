@@ -90,7 +90,7 @@ func (p *Poster) HandleDirect(ctx context.Context, event *nostr.Event) error {
 	case 1:
 		return p.handleKind1Direct(ctx, event)
 	case 5:
-		p.handleKind5(ctx, event)
+		return p.handleKind5Direct(ctx, event)
 	case 6:
 		return p.handleKind6Direct(ctx, event)
 	case 7:
@@ -122,8 +122,19 @@ func (p *Poster) handleKind1(ctx context.Context, event *nostr.Event) {
 	}
 }
 
-// handleKind5 deletes a previously bridged post on Bluesky.
+// handleKind5 deletes previously bridged posts on Bluesky. Errors are logged
+// only; for retry-aware delivery use handleKind5Direct.
 func (p *Poster) handleKind5(ctx context.Context, event *nostr.Event) {
+	if err := p.handleKind5Direct(ctx, event); err != nil {
+		slog.Warn("bsky: handleKind5 delete failed", "id", event.ID, "error", err)
+	}
+}
+
+// handleKind5Direct deletes bridged posts and returns the first error encountered
+// so the outbox can retry. The object mapping is removed only after a successful
+// DeleteRecord, so a retried attempt finds the same URI and re-issues the delete.
+func (p *Poster) handleKind5Direct(ctx context.Context, event *nostr.Event) error {
+	var firstErr error
 	for _, tag := range event.Tags {
 		if len(tag) < 2 || tag[0] != "e" {
 			continue
@@ -145,13 +156,19 @@ func (p *Poster) handleKind5(ctx context.Context, event *nostr.Event) {
 		slog.Info("bsky: deleting bridged post", "nostrID", deletedID, "atURI", atURI)
 		if err := p.Client.DeleteRecord(ctx, p.Client.DID(), collection, rkey); err != nil {
 			slog.Warn("bsky: delete record failed", "atURI", atURI, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		// Evict the mapping so the idempotency guard (GetAPIDForObject) no
-		// longer blocks a potential re-post of the same Nostr event ID.
+		// longer blocks a potential re-post of the same Nostr event ID, and
+		// so a retry doesn't re-issue an already-successful delete.
 		if err := p.Store.DeleteObject(atURI, deletedID); err != nil {
 			slog.Warn("bsky: failed to remove object mapping", "atURI", atURI, "error", err)
 		}
 	}
+	return firstErr
 }
 
 // handleKind6 reposts a bridged note on Bluesky.

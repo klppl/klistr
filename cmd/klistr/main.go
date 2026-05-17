@@ -196,8 +196,22 @@ func main() {
 
 	// ─── Relay list: prefer DB-persisted override over env ────────────────────
 	// Relay list changes made via /web admin UI are stored in kv["nostr_relays"].
+	// Re-validate each entry — an old/manually-edited DB row mustn't smuggle in
+	// an insecure ws:// URL (or any other scheme) without going through the
+	// admin handler's validation.
 	if saved, ok := store.GetKV("nostr_relays"); ok && saved != "" {
-		overrides := strings.Split(saved, ",")
+		var overrides []string
+		for _, candidate := range strings.Split(saved, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+			if !nostrpkg.IsValidRelayURL(candidate) {
+				slog.Warn("dropping persisted relay URL: validation failed", "relay", candidate)
+				continue
+			}
+			overrides = append(overrides, candidate)
+		}
 		if len(overrides) > 0 {
 			cfg.NostrRelays = overrides
 			slog.Info("using persisted relay list", "relays", cfg.NostrRelays)

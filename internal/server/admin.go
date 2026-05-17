@@ -1100,13 +1100,28 @@ async function addFollow(bridge) {
     if (r.ok) {
       document.getElementById(inputId).value = '';
       msgEl.textContent = '';
-      toast('Now following ' + handle);
+      if (d.kind_3_pending) {
+        handleKind3Pending('Following ' + handle, d.message);
+      } else {
+        toast('Now following ' + handle);
+      }
       loadFollowing();
     } else {
       msgEl.textContent = 'Error: ' + (d.error || r.statusText);
     }
   } catch(e) {
     msgEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+// handleKind3Pending shows the relay-distribution-failed message and offers
+// to call republishKind3 immediately. Used by both addFollow and removeFollow.
+function handleKind3Pending(actionLabel, serverMsg) {
+  const detail = serverMsg || 'Kind-3 relay distribution failed. Re-publish now?';
+  if (confirm(actionLabel + ' succeeded locally, but relay distribution failed.\n\n' + detail + '\n\nRe-publish kind-3 to all relays now?')) {
+    republishKind3();
+  } else {
+    toast(actionLabel + ' — re-publish kind-3 later to push to relays');
   }
 }
 
@@ -1126,7 +1141,11 @@ async function removeFollow(handle, bridge) {
       return;
     }
     if (r.ok) {
-      toast('Unfollowed ' + handle);
+      if (d.kind_3_pending) {
+        handleKind3Pending('Unfollowed ' + handle, d.message);
+      } else {
+        toast('Unfollowed ' + handle);
+      }
       loadFollowing();
     } else {
       toast('Error: ' + (d.error || r.statusText));

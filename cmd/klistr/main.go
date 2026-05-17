@@ -492,6 +492,13 @@ func main() {
 	srv.SetResyncTrigger(resyncTrigger)
 	srv.SetFollowPublisher(&followPublisherAdapter{signer: signer, publisher: publisher})
 	srv.SetRelayManager(relayMgr)
+	srv.SetOutboxStats(func() (pending, claimed, done, dead int, err error) {
+		stats, err := outboxQueue.Stats()
+		if err != nil {
+			return 0, 0, 0, 0, err
+		}
+		return stats.Pending, stats.Claimed, stats.Done, stats.Dead, nil
+	})
 	srv.SetShowSourceLink(showSourceLink)
 	srv.SetAutoAcceptFollows(autoAcceptFollowsBool)
 	srv.Start(ctx) // blocks until ctx is cancelled

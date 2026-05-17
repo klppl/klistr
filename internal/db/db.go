@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -181,6 +182,11 @@ func (s *Store) migratePostgres() error {
 // Close closes the database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// Ping verifies the database is reachable. Returns nil on success.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
 // ─── Objects ──────────────────────────────────────────────────────────────────

@@ -46,6 +46,11 @@ type ActorResolver interface {
 	PublicKey(apActorURL string) (string, error)
 }
 
+// OutboxStatsFunc returns aggregate counts from the delivery queue. Provided
+// by main.go via SetOutboxStats; nil means the deep healthcheck simply omits
+// the outbox section. Avoids server depending on the outbox package directly.
+type OutboxStatsFunc func() (pending, claimed, done, dead int, err error)
+
 const (
 	// maxConcurrentActivities is the total inbox concurrency cap.
 	// Activities arriving beyond this limit receive a 503 response.
@@ -177,6 +182,7 @@ type Server struct {
 	followPublisher   FollowPublisher
 	bskyClient        BskyClient
 	relayManager      RelayManager
+	outboxStats       OutboxStatsFunc
 	showSourceLink    *atomic.Bool
 	autoAcceptFollows *atomic.Bool
 
@@ -237,6 +243,10 @@ func (s *Server) SetBskyClient(c BskyClient) { s.bskyClient = c }
 // SetRelayManager attaches the relay manager for the /web relay management endpoints.
 func (s *Server) SetRelayManager(rm RelayManager) { s.relayManager = rm }
 
+// SetOutboxStats attaches an outbox stats function for the deep healthcheck.
+// When nil, the healthcheck omits outbox status.
+func (s *Server) SetOutboxStats(fn OutboxStatsFunc) { s.outboxStats = fn }
+
 // SetShowSourceLink attaches the shared atomic bool controlling whether bridged
 // notes include a source link. Updated live by the admin settings API.
 func (s *Server) SetShowSourceLink(b *atomic.Bool) { s.showSourceLink = b }
@@ -280,10 +290,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
-	// Health check.
-	r.Get("/api/healthcheck", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
-	})
+	// Health check. Always returns HTTP 200; `ok` in the JSON body is the
+	// real signal so load balancers / monitors don't pretzel around partial
+	// degradation. See handleHealthcheck for the per-subsystem details.
+	r.Get("/api/healthcheck", s.handleHealthcheck)
 
 	// Discovery endpoints.
 	r.Get("/.well-known/webfinger", s.handleWebFinger)
@@ -395,6 +405,9 @@ func (s *Server) handleActor(w http.ResponseWriter, r *http.Request) {
 		actor.Image = &ap.Image{Type: "Image", URL: s.cfg.NostrBanner}
 	}
 
+	// Profile metadata can change via the settings UI; keep the window short
+	// enough that bridged servers see an updated avatar/bio within a few min.
+	w.Header().Set("Cache-Control", "public, max-age=300")
 	apResponse(w, ap.WithContext(actor))
 }
 
@@ -413,6 +426,10 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {
 		"attributedTo": s.cfg.BaseURL("/users/" + s.cfg.NostrUsername),
 		"content":      "",
 	}
+	// Note objects are immutable once created (edits go through Update activities
+	// which fan out to follower inboxes anyway). Aggressive caching here cuts
+	// down on re-fetches by AP servers indexing thread context or rendering links.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	apResponse(w, note)
 }
 

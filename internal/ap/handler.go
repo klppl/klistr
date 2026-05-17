@@ -577,9 +577,12 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 			replyToEventID = id
 
 			// Walk the reply chain up to 10 levels to find the true thread root.
+			// `visited` guards against cyclic InReplyTo chains (A→B→A) that
+			// would otherwise burn a full 10 fetches before the depth cap kicks in.
 			const maxAncestorDepth = 10
 			rootEventID = replyToEventID
 			currentURL := note.InReplyTo
+			visited := map[string]bool{currentURL: true}
 
 			for depth := 0; depth < maxAncestorDepth; depth++ {
 				parentObj, err := FetchObject(ctx, currentURL)
@@ -590,6 +593,12 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 				if parentNote == nil || parentNote.InReplyTo == "" {
 					break // reached the root — currentURL is the root post
 				}
+				if visited[parentNote.InReplyTo] {
+					slog.Debug("reply chain cycle detected, stopping walk",
+						"note", note.ID, "at", parentNote.InReplyTo)
+					break
+				}
+				visited[parentNote.InReplyTo] = true
 				// Try to resolve the next ancestor
 				if ancestorID, ok := h.resolveNostrID(parentNote.InReplyTo); ok {
 					rootEventID = ancestorID

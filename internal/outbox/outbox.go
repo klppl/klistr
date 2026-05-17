@@ -3,6 +3,7 @@ package outbox
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -82,10 +83,21 @@ func (q *Queue) Migrate() error {
 		last_error      TEXT,
 		created_at      TEXT NOT NULL,
 		completed_at    TEXT,
-		source_event_id TEXT
+		source_event_id TEXT,
+		claimed_at      TEXT
 	)`)
 	if err != nil {
 		return err
+	}
+	// Existing deployments may pre-date the claimed_at column. Add it if absent.
+	// IF NOT EXISTS works in SQLite ≥3.35 and PostgreSQL ≥9.6.
+	if _, err := q.db.Exec(`ALTER TABLE outbox ADD COLUMN claimed_at TEXT`); err != nil {
+		// Ignore "duplicate column" / "already exists" errors — driver-specific
+		// codes vary, so match by substring rather than coupling to one driver.
+		msg := err.Error()
+		if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "already exists") {
+			return fmt.Errorf("outbox migrate add claimed_at: %w", err)
+		}
 	}
 	if _, err := q.db.Exec(`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`); err != nil {
 		return err
@@ -225,13 +237,14 @@ func (q *Queue) Claim(destType string) (Item, bool, error) {
 		return Item{}, false, fmt.Errorf("outbox claim select: %w", err)
 	}
 
+	claimedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	var updateQ string
 	if q.driver == "sqlite" {
-		updateQ = `UPDATE outbox SET status = 'claimed' WHERE id = ?`
+		updateQ = `UPDATE outbox SET status = 'claimed', claimed_at = ? WHERE id = ?`
 	} else {
-		updateQ = `UPDATE outbox SET status = 'claimed' WHERE id = $1`
+		updateQ = `UPDATE outbox SET status = 'claimed', claimed_at = $1 WHERE id = $2`
 	}
-	if _, err := tx.Exec(updateQ, id); err != nil {
+	if _, err := tx.Exec(updateQ, claimedAt, id); err != nil {
 		return Item{}, false, fmt.Errorf("outbox claim update: %w", err)
 	}
 
@@ -418,6 +431,28 @@ func (q *Queue) RetryDeadForDest(destURL string) (int64, error) {
 	result, err := q.db.Exec(query, now, destURL)
 	if err != nil {
 		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// ReapStale flips rows that have been status='claimed' for longer than maxAge
+// back to 'pending' without incrementing attempts. This recovers items abandoned
+// by crashed workers (process killed between Claim and Complete/Fail/Reschedule);
+// the row would otherwise stay claimed forever. Returns the number of rows reaped.
+func (q *Queue) ReapStale(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var query string
+	if q.driver == "sqlite" {
+		query = `UPDATE outbox SET status = 'pending', claimed_at = NULL, next_retry_at = ?
+			WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?`
+	} else {
+		query = `UPDATE outbox SET status = 'pending', claimed_at = NULL, next_retry_at = $1
+			WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < $2`
+	}
+	result, err := q.db.Exec(query, now, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("outbox reap stale: %w", err)
 	}
 	return result.RowsAffected()
 }

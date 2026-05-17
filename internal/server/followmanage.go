@@ -575,61 +575,27 @@ func (s *Server) handleWipeFollows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Unfollow from the DB directly.
-	for _, targetActorURL := range apFollows {
-		if err := s.store.RemoveFollow(localActorURL, targetActorURL); err != nil {
-			slog.Warn("wipe-follows: failed to remove from db", "actor", targetActorURL, "error", err)
-		}
-	}
-
-	// 2. Publish a merged kind-3 with empty desired additions but all current
-	// known pubkeys marked as removals. By omitting pubkeys from the new kind-3,
-	// the relay will echo it and our handleKind3 will issue Undo Follow for
-	// everyone who was in the previous list.
-	// Since we already deleted them from the DB, we just rely on `handleKind3`
-	// processing the removal and doing the AP cleanup. Actually, handleKind3 reads
-	// from the DB to see who to Undo. Since we just deleted them, it won't know!
-	//
-	// Better approach: just let handleKind3 do the work. We publish an empty kind-3
-	// (or a kind-3 containing ONLY the Bluesky follows without the AP follows).
-
-	// Get current Bluesky follows to preserve them in the kind-3.
-	bskyKeys := []string{}
-	if bskyFollows, err := s.store.GetBskyFollowing(localActorURL); err == nil {
-		for _, bskyID := range bskyFollows {
-			did := strings.TrimPrefix(bskyID, "bsky:")
-			if pubkey, err := s.actorResolver.PublicKey(did); err == nil {
-				bskyKeys = append(bskyKeys, pubkey)
-			}
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// mergeAndPublishKind3 will construct a new list using only bskyKeys.
-	// It replaces the old kind-3. When handleKind3 sees the new list is missing
-	// the AP keys, it will cross-reference with the DB, send Undo Follow to them,
-	// and THEN delete them from the DB.
-	_, _, err = s.mergeAndPublishKind3(ctx, bskyKeys, nil) // use Set semantics, actually mergeAndPublishKind3 ADDS keys.
-	if err != nil {
-		slog.Error("wipe-follows: failed to publish kind-3", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Wait, mergeAndPublishKind3(ctx, add, remove) takes lists.
-	// We want to REMOVE all AP keys.
-	apKeysToRemove := []string{}
+	// Collect AP pubkeys to remove BEFORE touching the DB so the merge step
+	// sees the same DB state mergeAndPublishKind3 would see during a normal
+	// remove call. (Bluesky follows are preserved automatically by the merge.)
+	apKeysToRemove := make([]string, 0, len(apFollows))
 	for _, targetActorURL := range apFollows {
 		if pubkey, err := s.actorResolver.PublicKey(targetActorURL); err == nil {
 			apKeysToRemove = append(apKeysToRemove, pubkey)
 		}
 	}
 
-	_, _, err = s.mergeAndPublishKind3(ctx, nil, apKeysToRemove)
-	if err != nil {
-		slog.Error("wipe-follows: failed to publish kind-3 removals", "error", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Single merged kind-3 publish: the merge function preserves Bluesky
+	// follows via its own DB scan; the removals list strips the AP ones.
+	// The relay echoes the event back and handleKind3 reads the DB to compute
+	// which AP actors to Undo Follow — so we must publish FIRST and only
+	// then clear the AP rows from the DB, otherwise handleKind3 sees no
+	// follows to undo and no Undo Follow activities go out.
+	if _, _, err := s.mergeAndPublishKind3(ctx, nil, apKeysToRemove); err != nil {
+		slog.Error("wipe-follows: failed to publish kind-3", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

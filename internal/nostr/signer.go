@@ -6,12 +6,18 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"sync"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/klppl/klistr/internal/cache"
 )
+
+// signerCacheSize bounds the in-memory derived-key cache. ~10k entries
+// (~1.2 MB) covers a very long tail of bridged actors; a miss just re-runs
+// HKDF, which is cheap.
+const signerCacheSize = 10_000
 
 // Signer provides signing for both the local Nostr user and derived keys for
 // ActivityPub actors. The local user's actual private key is used for their own
@@ -20,8 +26,7 @@ import (
 type Signer struct {
 	localPrivKey string
 	localPubKey  string
-	mu           sync.RWMutex
-	cache        map[string]string // apID → derived hex privkey
+	cache        *cache.LRU[string, string] // apID → derived hex privkey
 }
 
 // NewSigner creates a new Signer with the user's Nostr private and public keys.
@@ -29,7 +34,7 @@ func NewSigner(privKey, pubKey string) *Signer {
 	return &Signer{
 		localPrivKey: privKey,
 		localPubKey:  pubKey,
-		cache:        make(map[string]string),
+		cache:        cache.New[string, string](signerCacheSize),
 	}
 }
 
@@ -53,12 +58,9 @@ func (s *Signer) LocalPublicKey() string {
 // another valid seed string. salt=nil is safe because the IKM already carries
 // 256 bits of entropy. Result is cached.
 func (s *Signer) derivedPrivKey(apID string) string {
-	s.mu.RLock()
-	if key, ok := s.cache[apID]; ok {
-		s.mu.RUnlock()
+	if key, ok := s.cache.Get(apID); ok {
 		return key
 	}
-	s.mu.RUnlock()
 
 	privKeyBytes, err := hex.DecodeString(s.localPrivKey)
 	if err != nil || len(privKeyBytes) != 32 {
@@ -72,10 +74,7 @@ func (s *Signer) derivedPrivKey(apID string) string {
 		panic("signer: hkdf read failed: " + err.Error())
 	}
 	key := hex.EncodeToString(derived[:])
-
-	s.mu.Lock()
-	s.cache[apID] = key
-	s.mu.Unlock()
+	s.cache.Add(apID, key)
 	return key
 }
 

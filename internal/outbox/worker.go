@@ -91,8 +91,19 @@ func (wp *WorkerPool) Notify(destType string) {
 	}
 }
 
+// reapStaleAge is the threshold after which a status='claimed' row is assumed
+// abandoned by a crashed worker and flipped back to pending. Set well above
+// any sane delivery time (AP HTTP delivery has its own short context) but low
+// enough that crash recovery doesn't have to wait long.
+const reapStaleAge = 5 * time.Minute
+
+// reapStaleInterval is how often the reaper goroutine checks for abandoned rows.
+const reapStaleInterval = 60 * time.Second
+
 // Start launches all worker goroutines. Non-blocking — returns immediately.
-// Workers run until ctx is cancelled.
+// Workers run until ctx is cancelled. Also starts a single reaper goroutine
+// that periodically calls Queue.ReapStale to recover rows abandoned by crashed
+// workers (rows stuck in status='claimed').
 func (wp *WorkerPool) Start(ctx context.Context) {
 	launch := func(destType string, count int) {
 		for i := 0; i < count; i++ {
@@ -103,6 +114,35 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 	launch("ap", wp.config.APWorkers)
 	launch("relay", wp.config.RelayWorkers)
 	launch("bsky", wp.config.BskyWorkers)
+
+	go wp.runReaper(ctx)
+}
+
+// runReaper periodically reclaims rows stuck in status='claimed' beyond
+// reapStaleAge so a worker crash mid-delivery doesn't strand items forever.
+func (wp *WorkerPool) runReaper(ctx context.Context) {
+	ticker := time.NewTicker(reapStaleInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := wp.queue.ReapStale(reapStaleAge)
+			if err != nil {
+				slog.Warn("outbox reaper failed", "error", err)
+				continue
+			}
+			if n > 0 {
+				slog.Info("outbox reaper recovered abandoned rows", "count", n)
+				// Wake every worker pool so the recovered rows are picked up
+				// without waiting for the fallback poll tick.
+				wp.Notify("ap")
+				wp.Notify("relay")
+				wp.Notify("bsky")
+			}
+		}
+	}
 }
 
 func (wp *WorkerPool) runWorker(ctx context.Context, destType string, workerID int) {

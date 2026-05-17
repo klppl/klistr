@@ -65,6 +65,77 @@ func TestEnqueueAndClaim(t *testing.T) {
 	}
 }
 
+func TestReapStaleRecoversAbandonedRow(t *testing.T) {
+	q := testQueue(t)
+
+	id, err := q.Enqueue(Item{
+		DestType: "ap",
+		DestURL:  "https://target/inbox",
+		Payload:  "{}",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker claims the row...
+	_, ok, err := q.Claim("ap")
+	if err != nil || !ok {
+		t.Fatalf("expected to claim: ok=%v err=%v", ok, err)
+	}
+
+	// ...then crashes (no Complete/Fail/Reschedule called).
+	// Simulate "long enough ago" by rewriting claimed_at to the past.
+	past := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := q.db.Exec(`UPDATE outbox SET claimed_at = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reaper kicks in.
+	n, err := q.ReapStale(5 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped = %d, want 1", n)
+	}
+
+	// Row is back to pending without burning an attempt.
+	item, err := q.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Status != StatusPending {
+		t.Errorf("status = %q, want pending", item.Status)
+	}
+	if item.Attempts != 0 {
+		t.Errorf("attempts = %d, want 0 (crashes shouldn't burn retries)", item.Attempts)
+	}
+
+	// Reaper is idempotent — second pass finds nothing to do.
+	n2, err := q.ReapStale(5 * time.Minute)
+	if err != nil || n2 != 0 {
+		t.Errorf("second reap should be no-op, got n=%d err=%v", n2, err)
+	}
+}
+
+func TestReapStaleLeavesFreshClaimsAlone(t *testing.T) {
+	q := testQueue(t)
+	q.Enqueue(Item{DestType: "ap", DestURL: "https://a", Payload: "{}"})
+
+	if _, ok, _ := q.Claim("ap"); !ok {
+		t.Fatal("expected to claim")
+	}
+
+	// A fresh claim must NOT be reaped.
+	n, err := q.ReapStale(5 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("fresh claim was reaped: n=%d", n)
+	}
+}
+
 func TestEnqueueDedupsBySourceEvent(t *testing.T) {
 	q := testQueue(t)
 

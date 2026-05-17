@@ -8,21 +8,28 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
+
+	"github.com/klppl/klistr/internal/cache"
 )
+
+// objectCacheSize bounds the in-memory object-ID caches. ~50k entries is
+// comfortably small in memory (~10 MB) while still hitting the cache for
+// virtually all live AP traffic (recent posts, reactions, follows).
+const objectCacheSize = 50_000
 
 // Store wraps a database connection and provides all data access methods.
 type Store struct {
 	db     *sql.DB
 	driver string
 
-	// In-memory caches to reduce DB round-trips.
-	objectsByAP    sync.Map // ap_id → nostr_id
-	objectsByNostr sync.Map // nostr_id → ap_id
+	// Bounded LRUs to cap memory under long-running operation. Cache misses
+	// fall through to the DB; eviction is invisible to correctness.
+	objectsByAP    *cache.LRU[string, string] // ap_id → nostr_id
+	objectsByNostr *cache.LRU[string, string] // nostr_id → ap_id
 }
 
 // Open opens a database connection. The URL can be:
@@ -74,7 +81,12 @@ func Open(databaseURL string) (*Store, error) {
 		)
 	}
 
-	return &Store{db: db, driver: driver}, nil
+	return &Store{
+		db:             db,
+		driver:         driver,
+		objectsByAP:    cache.New[string, string](objectCacheSize),
+		objectsByNostr: cache.New[string, string](objectCacheSize),
+	}, nil
 }
 
 // Migrate runs all pending database migrations.
@@ -175,31 +187,31 @@ func (s *Store) Close() error {
 
 // GetAPIDForObject returns the ActivityPub ID for a Nostr event ID, if known.
 func (s *Store) GetAPIDForObject(nostrID string) (string, bool) {
-	if v, ok := s.objectsByNostr.Load(nostrID); ok {
-		return v.(string), true
+	if v, ok := s.objectsByNostr.Get(nostrID); ok {
+		return v, true
 	}
 	var apID string
 	err := s.db.QueryRow(`SELECT ap_id FROM objects WHERE nostr_id = `+s.ph(), nostrID).Scan(&apID)
 	if err != nil {
 		return "", false
 	}
-	s.objectsByNostr.Store(nostrID, apID)
-	s.objectsByAP.Store(apID, nostrID)
+	s.objectsByNostr.Add(nostrID, apID)
+	s.objectsByAP.Add(apID, nostrID)
 	return apID, true
 }
 
 // GetNostrIDForObject returns the Nostr event ID for an ActivityPub object ID, if known.
 func (s *Store) GetNostrIDForObject(apID string) (string, bool) {
-	if v, ok := s.objectsByAP.Load(apID); ok {
-		return v.(string), true
+	if v, ok := s.objectsByAP.Get(apID); ok {
+		return v, true
 	}
 	var nostrID string
 	err := s.db.QueryRow(`SELECT nostr_id FROM objects WHERE ap_id = `+s.ph(), apID).Scan(&nostrID)
 	if err != nil {
 		return "", false
 	}
-	s.objectsByNostr.Store(nostrID, apID)
-	s.objectsByAP.Store(apID, nostrID)
+	s.objectsByNostr.Add(nostrID, apID)
+	s.objectsByAP.Add(apID, nostrID)
 	return nostrID, true
 }
 
@@ -216,8 +228,8 @@ func (s *Store) DeleteObject(apID, nostrID string) error {
 	}
 	_, err := s.db.Exec(q, apID, nostrID)
 	// Evict from both caches regardless of whether a DB row was found.
-	s.objectsByAP.Delete(apID)
-	s.objectsByNostr.Delete(nostrID)
+	s.objectsByAP.Remove(apID)
+	s.objectsByNostr.Remove(nostrID)
 	return err
 }
 
@@ -231,8 +243,8 @@ func (s *Store) AddObject(apID, nostrID string) error {
 	}
 	_, err := s.db.Exec(q, apID, nostrID)
 	if err == nil {
-		s.objectsByNostr.Store(nostrID, apID)
-		s.objectsByAP.Store(apID, nostrID)
+		s.objectsByNostr.Add(nostrID, apID)
+		s.objectsByAP.Add(apID, nostrID)
 	}
 	return err
 }

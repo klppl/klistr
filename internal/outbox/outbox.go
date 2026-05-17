@@ -60,6 +60,14 @@ func NewQueue(db *sql.DB, driver string) *Queue {
 // Migrate creates the outbox table if it doesn't exist.
 // This is also called from db.Store.Migrate via commonMigrations,
 // but having it here lets tests create the table independently.
+//
+// Also installs a partial UNIQUE index on (dest_type, dest_url, source_event_id)
+// that only applies when source_event_id is set. This makes Enqueue idempotent
+// for the same source event: two concurrent Handle() calls that race the
+// in-memory dedup check will both enqueue, but the second INSERT will hit ON
+// CONFLICT and become a no-op — preventing the Bluesky double-post and AP
+// double-deliver-to-same-inbox bugs. Background tasks without a source_event_id
+// are unaffected because the index is partial.
 func (q *Queue) Migrate() error {
 	_, err := q.db.Exec(`CREATE TABLE IF NOT EXISTS outbox (
 		id              INTEGER PRIMARY KEY,
@@ -79,11 +87,35 @@ func (q *Queue) Migrate() error {
 	if err != nil {
 		return err
 	}
-	_, err = q.db.Exec(`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`)
+	if _, err := q.db.Exec(`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`); err != nil {
+		return err
+	}
+
+	// Collapse any pre-existing duplicate rows so the unique index can be
+	// created. Keep the oldest row per (dest_type, dest_url, source_event_id)
+	// tuple — it's the canonical first enqueue.
+	if _, err := q.db.Exec(`DELETE FROM outbox
+		WHERE source_event_id IS NOT NULL AND source_event_id != ''
+		AND id NOT IN (
+			SELECT MIN(id) FROM outbox
+			WHERE source_event_id IS NOT NULL AND source_event_id != ''
+			GROUP BY dest_type, dest_url, source_event_id
+		)`); err != nil {
+		return fmt.Errorf("outbox dedup sweep: %w", err)
+	}
+
+	// Partial UNIQUE index — both SQLite and PostgreSQL support this syntax.
+	_, err = q.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS outbox_dedup
+		ON outbox(dest_type, dest_url, source_event_id)
+		WHERE source_event_id IS NOT NULL AND source_event_id != ''`)
 	return err
 }
 
-// Enqueue adds an item to the outbox. Returns the row ID.
+// Enqueue adds an item to the outbox. Returns the row ID — or 0 if the insert
+// was deduplicated by the partial UNIQUE(dest_type, dest_url, source_event_id)
+// index because a row with the same source event for the same destination
+// already exists. Callers can treat a (0, nil) result the same as a successful
+// enqueue: the originally-enqueued row will be (or has already been) delivered.
 func (q *Queue) Enqueue(item Item) (int64, error) {
 	now := time.Now().UTC()
 	if item.MaxAttempts == 0 {
@@ -96,13 +128,21 @@ func (q *Queue) Enqueue(item Item) (int64, error) {
 		item.CreatedAt = now
 	}
 
+	// ON CONFLICT clause must repeat the partial index's WHERE predicate so
+	// SQLite (and PostgreSQL) can match the right unique index.
 	var query string
 	if q.driver == "sqlite" {
 		query = `INSERT INTO outbox (dest_type, dest_url, payload, priority, status, attempts, max_attempts, next_retry_at, created_at, source_event_id)
-			VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)`
+			VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)
+			ON CONFLICT(dest_type, dest_url, source_event_id)
+				WHERE source_event_id IS NOT NULL AND source_event_id != ''
+				DO NOTHING`
 	} else {
 		query = `INSERT INTO outbox (dest_type, dest_url, payload, priority, status, attempts, max_attempts, next_retry_at, created_at, source_event_id)
-			VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $7, $8)`
+			VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $7, $8)
+			ON CONFLICT (dest_type, dest_url, source_event_id)
+				WHERE source_event_id IS NOT NULL AND source_event_id != ''
+				DO NOTHING`
 	}
 
 	result, err := q.db.Exec(query,
@@ -117,6 +157,11 @@ func (q *Queue) Enqueue(item Item) (int64, error) {
 	)
 	if err != nil {
 		return 0, fmt.Errorf("outbox enqueue: %w", err)
+	}
+	// On conflict (no row inserted) LastInsertId is unreliable across drivers;
+	// fall back to RowsAffected to distinguish insert vs no-op.
+	if n, err := result.RowsAffected(); err == nil && n == 0 {
+		return 0, nil
 	}
 	return result.LastInsertId()
 }

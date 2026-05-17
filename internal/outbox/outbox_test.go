@@ -65,6 +65,78 @@ func TestEnqueueAndClaim(t *testing.T) {
 	}
 }
 
+func TestEnqueueDedupsBySourceEvent(t *testing.T) {
+	q := testQueue(t)
+
+	// First enqueue inserts.
+	id1, err := q.Enqueue(Item{
+		DestType:      "bsky",
+		DestURL:       "https://bsky.social",
+		Payload:       `{"first":true}`,
+		SourceEventID: "evt-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 == 0 {
+		t.Fatal("expected first enqueue to return a row id")
+	}
+
+	// Second enqueue with same (dest_type, dest_url, source_event_id) is a no-op.
+	id2, err := q.Enqueue(Item{
+		DestType:      "bsky",
+		DestURL:       "https://bsky.social",
+		Payload:       `{"duplicate":true}`,
+		SourceEventID: "evt-1",
+	})
+	if err != nil {
+		t.Fatalf("dedup enqueue should not error: %v", err)
+	}
+	if id2 != 0 {
+		t.Errorf("dedup enqueue should return id=0, got %d", id2)
+	}
+
+	// Different dest_url with same source event: should insert (fan-out).
+	id3, err := q.Enqueue(Item{
+		DestType:      "relay",
+		DestURL:       "wss://relay-a",
+		Payload:       `{}`,
+		SourceEventID: "evt-2",
+	})
+	if err != nil || id3 == 0 {
+		t.Fatalf("fan-out target A should insert: id=%d err=%v", id3, err)
+	}
+	id4, err := q.Enqueue(Item{
+		DestType:      "relay",
+		DestURL:       "wss://relay-b",
+		Payload:       `{}`,
+		SourceEventID: "evt-2",
+	})
+	if err != nil || id4 == 0 {
+		t.Fatalf("fan-out target B should insert: id=%d err=%v", id4, err)
+	}
+
+	// Empty SourceEventID bypasses dedup — two rows allowed.
+	id5, err := q.Enqueue(Item{DestType: "ap", DestURL: "https://x", Payload: "{}"})
+	if err != nil || id5 == 0 {
+		t.Fatalf("empty-source enqueue 1 failed: id=%d err=%v", id5, err)
+	}
+	id6, err := q.Enqueue(Item{DestType: "ap", DestURL: "https://x", Payload: "{}"})
+	if err != nil || id6 == 0 {
+		t.Fatalf("empty-source enqueue 2 should also succeed (no dedup): id=%d err=%v", id6, err)
+	}
+
+	// Only the first (evt-1) plus evt-2 fan-out plus the two empty-source rows
+	// should be present — 5 total, none lost or duplicated.
+	stats, err := q.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.Pending; got != 5 {
+		t.Errorf("pending = %d, want 5 (evt-1 once + evt-2 fanned to two relays + 2 empty-source)", got)
+	}
+}
+
 func TestClaimRespectsDestType(t *testing.T) {
 	q := testQueue(t)
 

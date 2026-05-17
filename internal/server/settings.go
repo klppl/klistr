@@ -53,6 +53,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateSettings applies partial updates and persists them to the KV store.
+// Each field is persisted to KV BEFORE in-memory state is updated, so a KV
+// write failure leaves in-memory and on-disk state consistent (both unchanged
+// for the failing field). Successful fields are still applied — partial
+// success is reported honestly via 207 Multi-Status with a failed_fields list.
+//
 // PATCH /web/api/settings
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -71,94 +76,117 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	profileChanged := false
-	var changed []string // accumulate changed fields for the audit log
+	// persist applies one field: writes KV first, then runs `apply` to update
+	// the in-memory state only on success. Failure is recorded into failed and
+	// no in-memory update occurs, keeping memory consistent with disk.
+	var changed []string
+	var failed []string
+	profilePersisted := false
+	persist := func(field, key, value string, apply func()) {
+		if err := s.store.SetKV(key, value); err != nil {
+			slog.Warn("settings: KV write failed", "field", field, "error", err)
+			failed = append(failed, field)
+			return
+		}
+		apply()
+		changed = append(changed, field+"="+value)
+	}
 
 	if req.ShowSourceLink != nil {
-		s.showSourceLink.Store(*req.ShowSourceLink)
-		s.cfg.ShowSourceLink = *req.ShowSourceLink
-		if err := s.store.SetKV(kvShowSourceLink, strconv.FormatBool(*req.ShowSourceLink)); err != nil {
-			slog.Warn("settings: failed to persist show_source_link", "error", err)
-		}
-		slog.Info("settings: show_source_link updated", "value", *req.ShowSourceLink)
-		changed = append(changed, "show_source_link="+strconv.FormatBool(*req.ShowSourceLink))
+		v := *req.ShowSourceLink
+		persist("show_source_link", kvShowSourceLink, strconv.FormatBool(v), func() {
+			s.showSourceLink.Store(v)
+			s.cfg.ShowSourceLink = v
+		})
 	}
 
 	if req.AutoAcceptFollows != nil {
-		s.autoAcceptFollows.Store(*req.AutoAcceptFollows)
-		if err := s.store.SetKV(kvAutoAcceptFollows, strconv.FormatBool(*req.AutoAcceptFollows)); err != nil {
-			slog.Warn("settings: failed to persist auto_accept_follows", "error", err)
-		}
-		slog.Info("settings: auto_accept_follows updated", "value", *req.AutoAcceptFollows)
-		changed = append(changed, "auto_accept_follows="+strconv.FormatBool(*req.AutoAcceptFollows))
+		v := *req.AutoAcceptFollows
+		persist("auto_accept_follows", kvAutoAcceptFollows, strconv.FormatBool(v), func() {
+			s.autoAcceptFollows.Store(v)
+		})
 	}
 
 	if req.DisplayName != nil {
-		s.cfg.NostrDisplayName = *req.DisplayName
-		if err := s.store.SetKV(kvDisplayName, *req.DisplayName); err != nil {
-			slog.Warn("settings: failed to persist display_name", "error", err)
-		}
-		profileChanged = true
-		changed = append(changed, "display_name="+*req.DisplayName)
+		v := *req.DisplayName
+		persist("display_name", kvDisplayName, v, func() {
+			s.cfg.NostrDisplayName = v
+			profilePersisted = true
+		})
 	}
 
 	if req.Summary != nil {
-		s.cfg.NostrSummary = *req.Summary
-		if err := s.store.SetKV(kvSummary, *req.Summary); err != nil {
-			slog.Warn("settings: failed to persist summary", "error", err)
-		}
-		profileChanged = true
-		changed = append(changed, "summary=<updated>")
+		v := *req.Summary
+		persist("summary", kvSummary, v, func() {
+			s.cfg.NostrSummary = v
+			profilePersisted = true
+		})
 	}
 
 	if req.Picture != nil {
-		s.cfg.NostrPicture = *req.Picture
-		if err := s.store.SetKV(kvPicture, *req.Picture); err != nil {
-			slog.Warn("settings: failed to persist picture", "error", err)
-		}
-		profileChanged = true
-		changed = append(changed, "picture=<updated>")
+		v := *req.Picture
+		persist("picture", kvPicture, v, func() {
+			s.cfg.NostrPicture = v
+			profilePersisted = true
+		})
 	}
 
 	if req.Banner != nil {
-		s.cfg.NostrBanner = *req.Banner
-		if err := s.store.SetKV(kvBanner, *req.Banner); err != nil {
-			slog.Warn("settings: failed to persist banner", "error", err)
-		}
-		profileChanged = true
-		changed = append(changed, "banner=<updated>")
+		v := *req.Banner
+		persist("banner", kvBanner, v, func() {
+			s.cfg.NostrBanner = v
+			profilePersisted = true
+		})
 	}
 
 	if req.ExternalBaseURL != nil {
-		s.cfg.ExternalBaseURL = *req.ExternalBaseURL
-		if err := s.store.SetKV(kvExternalBaseURL, *req.ExternalBaseURL); err != nil {
-			slog.Warn("settings: failed to persist external_base_url", "error", err)
-		}
-		changed = append(changed, "external_base_url="+*req.ExternalBaseURL)
+		v := *req.ExternalBaseURL
+		persist("external_base_url", kvExternalBaseURL, v, func() {
+			s.cfg.ExternalBaseURL = v
+		})
 	}
 
 	if req.ZapPubkey != nil {
-		s.cfg.ZapPubkey = *req.ZapPubkey
-		if err := s.store.SetKV(kvZapPubkey, *req.ZapPubkey); err != nil {
-			slog.Warn("settings: failed to persist zap_pubkey", "error", err)
-		}
-		changed = append(changed, "zap_pubkey=<updated>")
+		v := *req.ZapPubkey
+		persist("zap_pubkey", kvZapPubkey, v, func() {
+			s.cfg.ZapPubkey = v
+		})
 	}
 
 	if req.ZapSplit != nil {
-		s.cfg.ZapSplit = *req.ZapSplit
-		if err := s.store.SetKV(kvZapSplit, strconv.FormatFloat(*req.ZapSplit, 'f', -1, 64)); err != nil {
-			slog.Warn("settings: failed to persist zap_split", "error", err)
-		}
-		changed = append(changed, "zap_split="+strconv.FormatFloat(*req.ZapSplit, 'f', -1, 64))
+		v := *req.ZapSplit
+		persist("zap_split", kvZapSplit, strconv.FormatFloat(v, 'f', -1, 64), func() {
+			s.cfg.ZapSplit = v
+		})
 	}
 
-	if profileChanged && s.followPublisher != nil {
+	// Only re-publish kind-0 if at least one profile field actually persisted.
+	if profilePersisted && s.followPublisher != nil {
 		s.publishLocalKind0(r.Context())
 	}
 
 	if len(changed) > 0 {
 		s.auditLog("settings_changed", strings.Join(changed, " "))
+	}
+
+	if len(failed) > 0 {
+		// Report partial success: 207 Multi-Status. Body includes the failed
+		// fields plus the post-update settings snapshot so the UI can refresh.
+		jsonResponse(w, map[string]interface{}{
+			"failed_fields": failed,
+			"settings": settingsResponse{
+				ShowSourceLink:    s.showSourceLink.Load(),
+				AutoAcceptFollows: s.autoAcceptFollows.Load(),
+				DisplayName:       s.cfg.NostrDisplayName,
+				Summary:           s.cfg.NostrSummary,
+				Picture:           s.cfg.NostrPicture,
+				Banner:            s.cfg.NostrBanner,
+				ExternalBaseURL:   s.cfg.ExternalBaseURL,
+				ZapPubkey:         s.cfg.ZapPubkey,
+				ZapSplit:          s.cfg.ZapSplit,
+			},
+		}, http.StatusMultiStatus)
+		return
 	}
 
 	s.handleGetSettings(w, r)

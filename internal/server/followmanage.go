@@ -99,24 +99,29 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
 
+	var kind3Published bool
 	switch req.Bridge {
 	case "fediverse":
-		if err := s.addFediverseFollow(ctx, req.Handle, localActorURL); err != nil {
+		pub, err := s.addFediverseFollow(ctx, req.Handle, localActorURL)
+		if err != nil {
 			slog.Warn("add fediverse follow failed", "handle", req.Handle, "error", err)
 			jsonResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}
+		kind3Published = pub
 
 	case "bsky":
 		if s.bskyClient == nil {
 			jsonResponse(w, map[string]string{"error": "Bluesky not configured"}, http.StatusServiceUnavailable)
 			return
 		}
-		if err := s.addBskyFollow(ctx, req.Handle, localActorURL); err != nil {
+		pub, err := s.addBskyFollow(ctx, req.Handle, localActorURL)
+		if err != nil {
 			slog.Warn("add bluesky follow failed", "handle", req.Handle, "error", err)
 			jsonResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}
+		kind3Published = pub
 
 	default:
 		jsonResponse(w, map[string]string{"error": "bridge must be 'fediverse' or 'bsky'"}, http.StatusBadRequest)
@@ -124,7 +129,12 @@ func (s *Server) handleAddFollow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditLog("follow_added", "bridge="+req.Bridge+" handle="+req.Handle)
-	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+	resp := map[string]interface{}{"status": "ok"}
+	if !kind3Published {
+		resp["kind_3_pending"] = true
+		resp["message"] = "Follow committed locally, but kind-3 distribution to relays failed. Use Re-publish kind-3 to retry."
+	}
+	jsonResponse(w, resp, http.StatusOK)
 }
 
 // handleRemoveFollow processes an unfollow request.
@@ -156,24 +166,31 @@ func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	localActorURL := s.cfg.BaseURL("/users/" + s.cfg.NostrUsername)
 
+	var kind3Published bool
 	switch req.Bridge {
 	case "fediverse":
+		// removeFediverseFollow's design relies on kind-3 echo via handleKind3
+		// to send the AP Undo Follow — if kind-3 publish fails, nothing happened,
+		// so propagate as a real error rather than kind_3_pending.
 		if err := s.removeFediverseFollow(ctx, req.Handle, localActorURL); err != nil {
 			slog.Warn("remove fediverse follow failed", "handle", req.Handle, "error", err)
 			jsonResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}
+		kind3Published = true
 
 	case "bsky":
 		if s.bskyClient == nil {
 			jsonResponse(w, map[string]string{"error": "Bluesky not configured"}, http.StatusServiceUnavailable)
 			return
 		}
-		if err := s.removeBskyFollow(ctx, req.Handle, localActorURL); err != nil {
+		pub, err := s.removeBskyFollow(ctx, req.Handle, localActorURL)
+		if err != nil {
 			slog.Warn("remove bluesky follow failed", "handle", req.Handle, "error", err)
 			jsonResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}
+		kind3Published = pub
 
 	default:
 		jsonResponse(w, map[string]string{"error": "bridge must be 'fediverse' or 'bsky'"}, http.StatusBadRequest)
@@ -181,33 +198,44 @@ func (s *Server) handleRemoveFollow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditLog("follow_removed", "bridge="+req.Bridge+" handle="+req.Handle)
-	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+	resp := map[string]interface{}{"status": "ok"}
+	if !kind3Published {
+		resp["kind_3_pending"] = true
+		resp["message"] = "Unfollow committed locally, but kind-3 distribution to relays failed. Use Re-publish kind-3 to retry."
+	}
+	jsonResponse(w, resp, http.StatusOK)
 }
 
 // ─── Bridge-specific helpers ──────────────────────────────────────────────────
 
-func (s *Server) addFediverseFollow(ctx context.Context, handle, localActorURL string) error {
+// addFediverseFollow stores the actor_key mapping for the resolved AP actor and
+// publishes a kind-3 contact list that includes the new pubkey. Returns
+// (kind3Published, err): err covers WebFinger / key derivation failures;
+// kind3Published=false means side effects (actor_key) are committed but the
+// kind-3 publish step failed — the caller can recover via republish-kind3.
+func (s *Server) addFediverseFollow(ctx context.Context, handle, localActorURL string) (bool, error) {
 	actorURL, err := ap.WebFingerResolve(ctx, handle)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	pubkey, err := s.actorResolver.PublicKey(actorURL)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if err := s.actorKeyStore.StoreActorKey(pubkey, actorURL); err != nil {
 		slog.Warn("add fediverse follow: failed to store actor key", "error", err)
 	}
 
-	_, _, err = s.mergeAndPublishKind3(ctx, []string{pubkey}, nil)
-	if err != nil {
-		return err
+	if _, _, err := s.mergeAndPublishKind3(ctx, []string{pubkey}, nil); err != nil {
+		slog.Warn("add fediverse follow: kind-3 publish failed (recoverable via republish-kind3)",
+			"handle", handle, "error", err)
+		return false, nil
 	}
 
 	slog.Info("add fediverse follow: published kind-3", "handle", handle, "actor", actorURL)
-	return nil
+	return true, nil
 }
 
 func (s *Server) removeFediverseFollow(ctx context.Context, handleOrURL, localActorURL string) error {
@@ -239,17 +267,25 @@ func (s *Server) removeFediverseFollow(ctx context.Context, handleOrURL, localAc
 	return nil
 }
 
-func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string) error {
+// addBskyFollow creates the Bluesky follow record, persists DB state, and
+// publishes a kind-3 contact list. Returns (kind3Published, err): err covers
+// Bluesky API and key derivation failures; kind3Published=false means the
+// Bluesky follow IS active and DB state is correct, only kind-3 distribution
+// failed — the caller can recover via republish-kind3. This prevents the
+// retry-creates-duplicate-Bluesky-follow bug where the user sees an error
+// from kind-3 failure and re-issues the follow, calling FollowActor again
+// and creating two graph.follow records on Bluesky.
+func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string) (bool, error) {
 	profile, err := s.bskyClient.GetProfile(ctx, handle)
 	if err != nil {
-		return err
+		return false, err
 	}
 	did := profile.DID
 	resolvedHandle := profile.Handle
 
 	rkey, err := s.bskyClient.FollowActor(ctx, did)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Persist rkey so we can delete the follow later.
@@ -261,7 +297,7 @@ func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string
 	// poller uses when signing kind-1 replies and kind-0 profiles for this author.
 	pubkey, err := s.actorResolver.PublicKey(did)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if err := s.store.AddFollow(localActorURL, "bsky:"+did); err != nil {
@@ -272,16 +308,22 @@ func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string
 	// display their name, avatar, bio, and a link back to their Bluesky profile.
 	s.publishBskyProfileKind0(ctx, profile)
 
-	_, _, err = s.mergeAndPublishKind3(ctx, []string{pubkey}, nil)
-	if err != nil {
-		return err
+	if _, _, err := s.mergeAndPublishKind3(ctx, []string{pubkey}, nil); err != nil {
+		slog.Warn("add bsky follow: kind-3 publish failed (recoverable via republish-kind3)",
+			"handle", resolvedHandle, "did", did, "error", err)
+		return false, nil
 	}
 
 	slog.Info("add bsky follow: followed and published kind-3", "handle", resolvedHandle, "did", did)
-	return nil
+	return true, nil
 }
 
-func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorURL string) error {
+// removeBskyFollow deletes the Bluesky follow record, removes the DB row, and
+// publishes a kind-3 reflecting the change. Returns (kind3Published, err):
+// err covers Bluesky API and key derivation failures; kind3Published=false
+// means the Bluesky unfollow IS active and DB is updated, only kind-3
+// distribution failed — caller can recover via republish-kind3.
+func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorURL string) (bool, error) {
 	// Resolve the DID — accept either handle or DID directly.
 	var did string
 	if strings.HasPrefix(handleOrDID, "did:") {
@@ -289,7 +331,7 @@ func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorUR
 	} else {
 		profile, err := s.bskyClient.GetProfile(ctx, handleOrDID)
 		if err != nil {
-			return err
+			return false, err
 		}
 		did = profile.DID
 	}
@@ -302,14 +344,14 @@ func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorUR
 	} else {
 		userDID := s.bskyClient.DID()
 		if err := s.bskyClient.DeleteRecord(ctx, userDID, "app.bsky.graph.follow", rkey); err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	// Use plain DID for key derivation (matches poller and addBskyFollow).
 	pubkey, err := s.actorResolver.PublicKey(did)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Explicitly remove from DB (handleKind3 won't clean up Bluesky entries).
@@ -317,13 +359,14 @@ func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorUR
 		slog.Warn("remove bsky follow: failed to remove from db", "error", err)
 	}
 
-	_, _, err = s.mergeAndPublishKind3(ctx, nil, []string{pubkey})
-	if err != nil {
-		return err
+	if _, _, err := s.mergeAndPublishKind3(ctx, nil, []string{pubkey}); err != nil {
+		slog.Warn("remove bsky follow: kind-3 publish failed (recoverable via republish-kind3)",
+			"did", did, "error", err)
+		return false, nil
 	}
 
 	slog.Info("remove bsky follow: unfollowed and published kind-3", "did", did)
-	return nil
+	return true, nil
 }
 
 // publishBskyProfileKind0 publishes a Nostr kind-0 metadata event for a Bluesky

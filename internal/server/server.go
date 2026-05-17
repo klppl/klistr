@@ -584,6 +584,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	// accept/reject decision until after we know the activity type: only
 	// "Delete" activities may be accepted without a verifiable signature.
 	var actorGone bool
+	var signingActorURL string
 	if s.cfg.SignFetch {
 		// Verify Digest header: confirms body was not modified in transit after signing.
 		if err := ap.VerifyDigest(body, r.Header.Get("Digest")); err != nil {
@@ -591,7 +592,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "digest mismatch", http.StatusUnauthorized)
 			return
 		}
-		_, err := ap.VerifySignature(r)
+		keyID, err := ap.VerifySignature(r)
 		if err != nil {
 			if errors.Is(err, ap.ErrActorGone) {
 				actorGone = true
@@ -601,15 +602,30 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Strip the key fragment (`#main-key`, `#publicKey`, etc.) to get the
+		// signing actor's URL. Some servers use the actor URL as the keyID
+		// directly with no fragment — that case naturally yields the URL.
+		if i := strings.IndexByte(keyID, '#'); i >= 0 {
+			signingActorURL = keyID[:i]
+		} else {
+			signingActorURL = keyID
+		}
 	}
 
-	// Now that we have the body, enforce the Gone-actor restriction: only
-	// Delete activities may proceed without a verified signature.
+	// Now that we have the body, enforce two body-dependent checks:
+	//   1. Gone-actor restriction: only Delete activities may proceed without a
+	//      verifiable signature.
+	//   2. Actor-match: the body's `actor` field must equal the signing key's
+	//      owner. Without this check, any valid signer could spoof any actor by
+	//      lying in the body — the signature verifies (the bytes really came
+	//      from them) but the activity is processed as the impersonated actor.
+	var peek struct {
+		Type  string          `json:"type"`
+		Actor json.RawMessage `json:"actor"`
+	}
+	_ = json.Unmarshal(body, &peek)
+
 	if actorGone {
-		var peek struct {
-			Type string `json:"type"`
-		}
-		_ = json.Unmarshal(body, &peek)
 		if peek.Type != "Delete" {
 			slog.Warn("rejecting non-Delete activity from gone actor",
 				"type", peek.Type, "remote", r.RemoteAddr)
@@ -617,6 +633,21 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Debug("accepting Delete from gone actor", "remote", r.RemoteAddr)
+	} else if s.cfg.SignFetch {
+		bodyActor := parseActorURL(peek.Actor)
+		if bodyActor == "" {
+			slog.Warn("inbox missing or unparseable actor field", "remote", r.RemoteAddr)
+			http.Error(w, "missing actor", http.StatusBadRequest)
+			return
+		}
+		if !actorURLsEqual(bodyActor, signingActorURL) {
+			slog.Warn("inbox actor-mismatch (signing key owner != body actor)",
+				"signing_actor", signingActorURL,
+				"body_actor", bodyActor,
+				"remote", r.RemoteAddr)
+			http.Error(w, "actor mismatch", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Derive the origin hostname for per-actor rate limiting.
@@ -898,6 +929,47 @@ func actorOrigin(body []byte, remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+// parseActorURL extracts an actor URL from the "actor" field of an inbound
+// activity. The field may be a string (Mastodon, Pleroma) or an embedded object
+// with an "id" field (older or non-conforming servers). Empty string on miss.
+func parseActorURL(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try the common case first: a JSON string.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	// Fall back to an object with an "id" field.
+	var obj struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return strings.TrimSpace(obj.ID)
+	}
+	return ""
+}
+
+// actorURLsEqual compares two actor URLs for equality under the canonicalization
+// AP servers actually disagree on: scheme + host are case-insensitive (per RFC
+// 3986); path is case-sensitive; a single trailing slash is ignored. Anything
+// stricter risks false negatives that would block legitimate Mastodon /
+// Pleroma / Misskey deliveries.
+func actorURLsEqual(a, b string) bool {
+	canon := func(u string) string {
+		u = strings.TrimRight(u, "/")
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return strings.ToLower(u) // best-effort fallback
+		}
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		parsed.Host = strings.ToLower(parsed.Host)
+		return parsed.String()
+	}
+	return canon(a) == canon(b)
 }
 
 // ─── Audit log ────────────────────────────────────────────────────────────────

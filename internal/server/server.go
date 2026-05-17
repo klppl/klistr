@@ -25,6 +25,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/klppl/klistr/internal/ap"
+	"github.com/klppl/klistr/internal/cache"
 	"github.com/klppl/klistr/internal/config"
 	"github.com/klppl/klistr/internal/db"
 )
@@ -69,15 +70,32 @@ const (
 	// Allows a short burst (e.g. Mastodon delivering a backlog) without 429s.
 	inboxRateBurst = 20
 
+	// nip05RateLimit is the per-IP rate budget for /.well-known/nostr.json.
+	// Higher than inbox because Nostr clients commonly do many parallel NIP-05
+	// lookups when rendering a feed (one per author). 30/s sustained + burst 60
+	// is comfortable for legit clients but stops the outbound-WebFinger
+	// amplification attack flat.
+	nip05RateLimit = rate.Limit(30)
+	nip05RateBurst = 60
+
 	// ipLimiterTTL is how long an idle IP's token bucket is retained before eviction.
 	ipLimiterTTL = 5 * time.Minute
+
+	// nip05CacheSize bounds the in-memory remote-handle→pubkey cache. ~5000
+	// entries is plenty for a single-user bridge (each entry is one resolved
+	// handle a Nostr client has ever asked us about).
+	nip05CacheSize = 5_000
 )
 
-// ipRateLimiter maintains a per-remote-IP token bucket to bound the inbox
-// request rate before any expensive work (signature verification) is done.
+// ipRateLimiter maintains a per-remote-IP token bucket to bound the request
+// rate from each source before any expensive work is done. Reused by the
+// inbox (signature-verification gate) and /.well-known/nostr.json
+// (outbound-WebFinger amplification gate) with different rate budgets.
 type ipRateLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*ipEntry
+	rate    rate.Limit
+	burst   int
 }
 
 type ipEntry struct {
@@ -85,8 +103,12 @@ type ipEntry struct {
 	lastSeen time.Time
 }
 
-func newIPRateLimiter() *ipRateLimiter {
-	l := &ipRateLimiter{entries: make(map[string]*ipEntry)}
+func newIPRateLimiter(r rate.Limit, burst int) *ipRateLimiter {
+	l := &ipRateLimiter{
+		entries: make(map[string]*ipEntry),
+		rate:    r,
+		burst:   burst,
+	}
 	// Background goroutine evicts stale entries so the map doesn't grow
 	// unboundedly over long uptimes with many distinct source IPs.
 	go func() {
@@ -106,7 +128,7 @@ func (l *ipRateLimiter) allow(ip string) bool {
 	defer l.mu.Unlock()
 	e, ok := l.entries[ip]
 	if !ok {
-		e = &ipEntry{limiter: rate.NewLimiter(inboxRateLimit, inboxRateBurst)}
+		e = &ipEntry{limiter: rate.NewLimiter(l.rate, l.burst)}
 		l.entries[ip] = e
 	}
 	e.lastSeen = time.Now()
@@ -173,7 +195,8 @@ type Server struct {
 	startedAt      time.Time
 	inboxSem       chan struct{}  // global concurrency cap for inbox processing
 	inboxLimiter   *inboxLimiter  // per-origin concurrency cap
-	inboxIPLimiter *ipRateLimiter // per-remote-IP token-bucket rate limiter
+	inboxIPLimiter *ipRateLimiter // per-remote-IP token-bucket rate limiter (inbox)
+	nip05IPLimiter *ipRateLimiter // per-remote-IP token-bucket rate limiter (NIP-05)
 
 	// Optional — set before Start() is called.
 	logBroadcaster    *LogBroadcaster
@@ -189,7 +212,8 @@ type Server struct {
 	// nip05Cache caches NIP-05 remote handle lookups (lowercase name → pubkey).
 	// Eliminates repeated WebFinger calls for the same handle across concurrent
 	// requests. NIP-05 names are case-insensitive so the key is lowercased.
-	nip05Cache sync.Map
+	// Bounded LRU to cap memory under sustained unique-name traffic.
+	nip05Cache *cache.LRU[string, string]
 
 	// csrfToken is a random 32-hex-character token generated at startup.
 	// The admin UI reads it from GET /web/api/status and sends it back in the
@@ -213,7 +237,9 @@ func New(cfg *config.Config, store *db.Store, keyPair *ap.KeyPair, apHandler *ap
 		startedAt:         time.Now(),
 		inboxSem:          make(chan struct{}, maxConcurrentActivities),
 		inboxLimiter:      newInboxLimiter(),
-		inboxIPLimiter:    newIPRateLimiter(),
+		inboxIPLimiter:    newIPRateLimiter(inboxRateLimit, inboxRateBurst),
+		nip05IPLimiter:    newIPRateLimiter(nip05RateLimit, nip05RateBurst),
+		nip05Cache:        cache.New[string, string](nip05CacheSize),
 		showSourceLink:    &atomic.Bool{},
 		autoAcceptFollows: func() *atomic.Bool { b := &atomic.Bool{}; b.Store(true); return b }(),
 		csrfToken:         hex.EncodeToString(tokenBytes),
@@ -723,13 +749,15 @@ func (s *Server) handleWebFinger(w http.ResponseWriter, r *http.Request) {
 	host := parts[1]
 	localHost := s.cfg.URL().Host
 
-	if host != localHost {
+	// DNS host comparison is case-insensitive (RFC 4343); usernames in the
+	// Fediverse are also normalised case-insensitively by Mastodon/Pleroma.
+	// Case-sensitive comparison here would 404 valid lookups with mixed case.
+	if !strings.EqualFold(host, localHost) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
-	// Only resolve the configured username.
-	if user != s.cfg.NostrUsername {
+	if !strings.EqualFold(user, s.cfg.NostrUsername) {
 		http.NotFound(w, r)
 		return
 	}
@@ -765,10 +793,28 @@ func (s *Server) handleNIP05(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Local user.
-	if name == s.cfg.NostrUsername {
+	// Rate-limit per remote IP. resolveRemoteHandle below makes outbound
+	// WebFinger calls on a cache miss — without this gate an attacker could
+	// amplify each inbound request into outbound HTTPS to an arbitrary domain.
+	// Limiter is nil when Server is built via direct struct literal (tests);
+	// in that path we skip the check.
+	if s.nip05IPLimiter != nil {
+		remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if remoteIP == "" {
+			remoteIP = r.RemoteAddr
+		}
+		if !s.nip05IPLimiter.allow(remoteIP) {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+	}
+
+	// Local user. NIP-05 names are case-insensitive per spec; echo back the
+	// requested name verbatim so the client can map its query to its display.
+	if strings.EqualFold(name, s.cfg.NostrUsername) {
 		jsonResponse(w, map[string]interface{}{
-			"names": map[string]string{s.cfg.NostrUsername: s.cfg.NostrPublicKey},
+			"names": map[string]string{name: s.cfg.NostrPublicKey},
 		}, http.StatusOK)
 		return
 	}
@@ -826,8 +872,8 @@ func (s *Server) resolveRemoteHandle(ctx context.Context, name string) (string, 
 	// NIP-05 names are case-insensitive; normalise before cache lookup so that
 	// "FruH_at_mastodonsweden.se" and "fruh_at_mastodonsweden.se" share one entry.
 	cacheKey := strings.ToLower(name)
-	if cached, ok := s.nip05Cache.Load(cacheKey); ok {
-		return cached.(string), true
+	if pubkey, ok := s.nip05Cache.Get(cacheKey); ok {
+		return pubkey, true
 	}
 
 	actorURL, err := ap.WebFingerResolve(ctx, handle)
@@ -846,7 +892,7 @@ func (s *Server) resolveRemoteHandle(ctx context.Context, name string) (string, 
 		slog.Warn("NIP-05: failed to store actor key", "error", err)
 	}
 
-	s.nip05Cache.Store(cacheKey, pubkey)
+	s.nip05Cache.Add(cacheKey, pubkey)
 	slog.Info("NIP-05: resolved remote handle", "name", name, "handle", handle, "actor", actorURL, "pubkey", pubkey[:8])
 	return pubkey, true
 }

@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -404,12 +405,28 @@ func main() {
 	enqueuer.Notifier = workerPool
 
 	// AP delivery worker: deserializes payload and calls DeliverActivity.
+	// - Applies the federator's per-origin rate limit BEFORE the HTTP call so
+	//   federationHostRate is actually enforced when delivery flows through
+	//   the outbox (the inline limiter in Federate doesn't run on the
+	//   enqueued path).
+	// - Non-retryable HTTP statuses (4xx except 408/429) come back wrapped in
+	//   ap.ErrPermanent; map to outbox.ErrPermanentFailure so the row dead-
+	//   letters immediately instead of burning all max_attempts on a status
+	//   that will never change.
 	workerPool.RegisterDeliverer("ap", func(ctx context.Context, item outbox.Item) error {
 		var activity map[string]interface{}
 		if err := json.Unmarshal([]byte(item.Payload), &activity); err != nil {
 			return fmt.Errorf("unmarshal AP activity: %w", err)
 		}
-		return ap.DeliverActivity(ctx, item.DestURL, activity, federator.KeyID, keyPair.Private)
+		if err := federator.RateLimitWait(ctx, item.DestURL); err != nil {
+			// ctx cancelled or limiter rejected — retry on the next claim.
+			return err
+		}
+		err := ap.DeliverActivity(ctx, item.DestURL, activity, federator.KeyID, keyPair.Private)
+		if err != nil && errors.Is(err, ap.ErrPermanent) {
+			return fmt.Errorf("%w: %s", outbox.ErrPermanentFailure, err)
+		}
+		return err
 	})
 
 	// Relay delivery worker: deserializes event and publishes to one relay.

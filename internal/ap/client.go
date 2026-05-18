@@ -27,6 +27,22 @@ var ErrGone = errors.New("resource gone (410)")
 // the activity type permits accepting an unsigned request (only "Delete" does).
 var ErrActorGone = errors.New("signing actor is gone (410)")
 
+// ErrPermanent wraps non-retryable delivery failures (HTTP 4xx other than
+// 408/429). Callers (notably the outbox AP worker) should map this to
+// outbox.ErrPermanentFailure so the row dead-letters immediately instead of
+// burning all max_attempts on a status that will never change.
+var ErrPermanent = errors.New("permanent AP delivery failure")
+
+// isRetryableStatus reports whether a remote HTTP status warrants another
+// delivery attempt. 408 (request timeout) and 429 (too many requests) are
+// transient; everything else 4xx is treated as permanent. 5xx is retryable.
+func isRetryableStatus(code int) bool {
+	if code == 408 || code == 429 {
+		return true
+	}
+	return code >= 500
+}
+
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
@@ -241,6 +257,9 @@ func DeliverActivity(ctx context.Context, inbox string, activity map[string]inte
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		if !isRetryableStatus(resp.StatusCode) {
+			return fmt.Errorf("%w: deliver to %s: HTTP %d", ErrPermanent, inbox, resp.StatusCode)
+		}
 		return fmt.Errorf("deliver to %s: HTTP %d", inbox, resp.StatusCode)
 	}
 

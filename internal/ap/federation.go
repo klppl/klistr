@@ -5,10 +5,13 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 
 	"golang.org/x/time/rate"
+
+	"github.com/klppl/klistr/internal/cache"
 )
 
 // Enqueuer is an optional interface for persisting outbound deliveries.
@@ -17,6 +20,11 @@ import (
 type Enqueuer interface {
 	EnqueueAP(destURL, payload string, priority int, sourceEventID string) error
 }
+
+// federationLimiterCapacity bounds the per-origin rate-limiter cache. A
+// large Mastodon-style fanout rarely touches more than a few hundred distinct
+// servers; 1000 is comfortably above that and prevents unbounded memory growth.
+const federationLimiterCapacity = 1000
 
 // Federator handles outbound federation of AP activities.
 type Federator struct {
@@ -30,8 +38,13 @@ type Federator struct {
 	// Enqueuer, when non-nil, routes deliveries through the outbox queue
 	// instead of performing inline HTTP POSTs.
 	Enqueuer Enqueuer
-	// perHostLimiter holds per-origin *rate.Limiter values (keyed by origin string).
-	perHostLimiter sync.Map
+
+	// perHostLimiter holds per-origin *rate.Limiter values, bounded so that
+	// a long-running bridge that touches many distinct origins doesn't leak
+	// memory. limiterInit makes the field lazy because Federator is often
+	// built as a plain struct literal (not via a constructor).
+	perHostLimiter     *cache.LRU[string, *rate.Limiter]
+	perHostLimiterOnce sync.Once
 }
 
 // concurrency returns the effective concurrency limit for this Federator.
@@ -55,12 +68,28 @@ const (
 	federationHostBurst = 5
 )
 
+// RateLimitWait blocks until the per-origin rate limit for inbox permits one
+// more delivery, or returns ctx.Err() if cancelled first. Use this from
+// outbox-driven delivery (where the inline rate limit in Federate doesn't run)
+// so federationHostRate is actually enforced in production.
+func (f *Federator) RateLimitWait(ctx context.Context, inbox string) error {
+	return f.hostLimiter(inbox).Wait(ctx)
+}
+
 // hostLimiter returns (creating if necessary) the per-origin rate limiter for
-// the given inbox URL.
+// the given inbox URL. The underlying LRU caps memory; an evicted origin just
+// gets a fresh limiter (and full burst budget) next time we deliver to it.
 func (f *Federator) hostLimiter(inbox string) *rate.Limiter {
+	f.perHostLimiterOnce.Do(func() {
+		f.perHostLimiter = cache.New[string, *rate.Limiter](federationLimiterCapacity)
+	})
 	origin := extractOrigin(inbox)
-	v, _ := f.perHostLimiter.LoadOrStore(origin, rate.NewLimiter(federationHostRate, federationHostBurst))
-	return v.(*rate.Limiter)
+	if lim, ok := f.perHostLimiter.Get(origin); ok {
+		return lim
+	}
+	lim := rate.NewLimiter(federationHostRate, federationHostBurst)
+	f.perHostLimiter.Add(origin, lim)
+	return lim
 }
 
 // Federate distributes an activity to all relevant inboxes.
@@ -280,13 +309,25 @@ func (f *Federator) priorityFor(activityType string) int {
 	}
 }
 
+// extractOrigin returns the scheme+host portion of a URL, with the host
+// lowercased. Lowercasing is required because hosts are case-insensitive per
+// RFC 3986/4343, but our shared-inbox dedup and per-host rate limiter both
+// use the origin string as a map key — without normalization, a server that
+// returns "Example.com" for one actor and "example.com" for another would
+// be treated as two origins, defeating dedup. Falls back to a basic string
+// scan if the URL is unparseable (defensive — should never happen on valid
+// AP inbox URLs).
 func extractOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err == nil && u.Scheme != "" && u.Host != "" {
+		return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	}
 	if idx := strings.Index(rawURL, "://"); idx != -1 {
 		rest := rawURL[idx+3:]
 		if slash := strings.IndexByte(rest, '/'); slash != -1 {
-			return rawURL[:idx+3+slash]
+			return strings.ToLower(rawURL[:idx+3+slash])
 		}
-		return rawURL
+		return strings.ToLower(rawURL)
 	}
-	return rawURL
+	return strings.ToLower(rawURL)
 }

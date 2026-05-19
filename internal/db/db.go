@@ -137,6 +137,8 @@ var commonMigrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log(ts)`,
 	// Outbox queue for at-least-once delivery across all three protocols.
+	// Fresh installs get all columns; existing DBs get any missing columns
+	// patched by post-migration ALTER statements below.
 	`CREATE TABLE IF NOT EXISTS outbox (
 		id              INTEGER PRIMARY KEY,
 		dest_type       TEXT NOT NULL,
@@ -150,9 +152,49 @@ var commonMigrations = []string{
 		last_error      TEXT,
 		created_at      TEXT NOT NULL,
 		completed_at    TEXT,
-		source_event_id TEXT
+		source_event_id TEXT,
+		claimed_at      TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`,
+}
+
+// postMigrations runs after commonMigrations and contains statements that may
+// legitimately fail on a fresh DB (column already exists, etc.). Each entry
+// lists error-substring matches that should be swallowed for idempotency.
+// This is how schema changes land on existing deployments without breaking
+// the "all-statements-must-succeed" guarantee of commonMigrations.
+var postMigrations = []struct {
+	sql        string
+	ignoreSubs []string // case-insensitive substrings; if any matches the error, skip
+}{
+	// Backfill claimed_at column on outbox tables that pre-date its addition.
+	// Both SQLite and PostgreSQL report a "duplicate"/"already exists" style
+	// error when the column already exists — we swallow that.
+	{
+		sql:        `ALTER TABLE outbox ADD COLUMN claimed_at TEXT`,
+		ignoreSubs: []string{"duplicate", "already exists"},
+	},
+	// Collapse any pre-existing duplicate rows so the partial unique index
+	// below can be installed. Keeps the oldest row per
+	// (dest_type, dest_url, source_event_id).
+	{
+		sql: `DELETE FROM outbox
+			WHERE source_event_id IS NOT NULL AND source_event_id != ''
+			AND id NOT IN (
+				SELECT MIN(id) FROM outbox
+				WHERE source_event_id IS NOT NULL AND source_event_id != ''
+				GROUP BY dest_type, dest_url, source_event_id
+			)`,
+	},
+	// Partial UNIQUE index for idempotent enqueue. Both SQLite (3.8+) and
+	// PostgreSQL support the WHERE clause syntax. Background tasks without a
+	// source_event_id are unaffected because the index is partial.
+	{
+		sql: `CREATE UNIQUE INDEX IF NOT EXISTS outbox_dedup
+			ON outbox(dest_type, dest_url, source_event_id)
+			WHERE source_event_id IS NOT NULL AND source_event_id != ''`,
+		ignoreSubs: []string{"already exists"},
+	},
 }
 
 func (s *Store) migrateSQLite() error {
@@ -160,6 +202,9 @@ func (s *Store) migrateSQLite() error {
 		if _, err := s.db.Exec(m); err != nil {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
 		}
+	}
+	if err := s.runPostMigrations(); err != nil {
+		return err
 	}
 	slog.Info("migrations complete")
 	return nil
@@ -175,7 +220,33 @@ func (s *Store) migratePostgres() error {
 			return fmt.Errorf("migration failed: %w", err)
 		}
 	}
+	if err := s.runPostMigrations(); err != nil {
+		return err
+	}
 	slog.Info("migrations complete")
+	return nil
+}
+
+// runPostMigrations executes statements that may legitimately fail on a fresh
+// DB (because they patch shape that's already there in the CREATE TABLE), and
+// swallows the configured idempotency errors per entry. Used to backfill new
+// columns and indexes onto existing deployments.
+func (s *Store) runPostMigrations() error {
+	for _, pm := range postMigrations {
+		if _, err := s.db.Exec(pm.sql); err != nil {
+			msg := strings.ToLower(err.Error())
+			ignored := false
+			for _, sub := range pm.ignoreSubs {
+				if strings.Contains(msg, strings.ToLower(sub)) {
+					ignored = true
+					break
+				}
+			}
+			if !ignored {
+				return fmt.Errorf("post-migration failed: %w\nSQL: %s", err, pm.sql)
+			}
+		}
+	}
 	return nil
 }
 

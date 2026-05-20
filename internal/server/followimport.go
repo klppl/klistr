@@ -149,40 +149,13 @@ func (s *Server) handleImportBskyFollowing(w http.ResponseWriter, r *http.Reques
 func (s *Server) resolveBskyFollowHandle(ctx context.Context, handle, localActorURL string) (importResult, string) {
 	res := importResult{Handle: handle}
 
-	profile, err := s.bskyClient.GetProfile(ctx, handle)
-	if err != nil {
-		res.Status = "error"
-		res.Error = "profile lookup failed: " + err.Error()
-		slog.Debug("import bsky following: profile lookup failed", "handle", handle, "error", err)
-		return res, ""
-	}
-
-	did := profile.DID
-	resolvedHandle := profile.Handle
-
-	rkey, err := s.bskyClient.FollowActor(ctx, did)
+	profile, pubkey, err := s.bskyFollowCore(ctx, handle, localActorURL)
 	if err != nil {
 		res.Status = "error"
 		res.Error = "follow failed: " + err.Error()
+		slog.Debug("import bsky following: follow failed", "handle", handle, "error", err)
 		return res, ""
 	}
-
-	_ = s.store.SetKV("bsky_follow_"+did, rkey)
-	_ = s.store.SetKV("bsky_follow_handle_"+did, resolvedHandle)
-
-	pubkey, err := s.actorResolver.PublicKey(did)
-	if err != nil {
-		res.Status = "error"
-		res.Error = "key derivation failed: " + err.Error()
-		return res, ""
-	}
-
-	if err := s.store.AddFollow(localActorURL, "bsky:"+did); err != nil {
-		slog.Warn("import bsky following: failed to store follow", "did", did, "error", err)
-	}
-
-	// Publish a Nostr kind-0 so clients can resolve the followed account's profile.
-	s.publishBskyProfileKind0(ctx, profile)
 
 	npub, err := nip19.EncodePublicKey(pubkey)
 	if err != nil {
@@ -190,9 +163,9 @@ func (s *Server) resolveBskyFollowHandle(ctx context.Context, handle, localActor
 	}
 
 	res.Status = "ok"
-	res.Actor = did
+	res.Actor = profile.DID
 	res.Npub = npub
-	slog.Info("import bsky following: followed", "handle", resolvedHandle, "did", did, "pubkey", pubkey[:8])
+	slog.Info("import bsky following: followed", "handle", profile.Handle, "did", profile.DID, "pubkey", pubkey[:8])
 	return res, pubkey
 }
 

@@ -162,10 +162,10 @@ func (cb *relayCircuit) reset() {
 
 // RelayStatus describes a relay and its circuit-breaker state.
 type RelayStatus struct {
-	URL               string
-	CircuitOpen       bool
-	FailCount         int
-	CooldownRemaining int // seconds remaining until circuit resets
+	URL               string `json:"url"`
+	CircuitOpen       bool   `json:"circuit_open"`
+	FailCount         int    `json:"fail_count"`
+	CooldownRemaining int    `json:"cooldown_remaining_secs,omitempty"`
 }
 
 func (cb *relayCircuit) status(url string) RelayStatus {

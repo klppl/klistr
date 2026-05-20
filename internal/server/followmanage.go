@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/klppl/klistr/internal/ap"
+	"github.com/klppl/klistr/internal/bridge"
 	"github.com/klppl/klistr/internal/bsky"
 	gonostr "github.com/nbd-wtf/go-nostr"
 )
@@ -267,54 +268,56 @@ func (s *Server) removeFediverseFollow(ctx context.Context, handleOrURL, localAc
 	return nil
 }
 
-// addBskyFollow creates the Bluesky follow record, persists DB state, and
-// publishes a kind-3 contact list. Returns (kind3Published, err): err covers
-// Bluesky API and key derivation failures; kind3Published=false means the
-// Bluesky follow IS active and DB state is correct, only kind-3 distribution
-// failed — the caller can recover via republish-kind3. This prevents the
-// retry-creates-duplicate-Bluesky-follow bug where the user sees an error
-// from kind-3 failure and re-issues the follow, calling FollowActor again
-// and creating two graph.follow records on Bluesky.
-func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string) (bool, error) {
+// bskyFollowCore performs the Bluesky API calls and DB writes for following a
+// Bluesky account (by handle or DID). Returns the profile, derived Nostr pubkey,
+// and any error. The caller is responsible for publishing kind-3 and error mapping.
+func (s *Server) bskyFollowCore(ctx context.Context, handle, localActorURL string) (*bsky.Profile, string, error) {
 	profile, err := s.bskyClient.GetProfile(ctx, handle)
 	if err != nil {
-		return false, err
+		return nil, "", err
 	}
 	did := profile.DID
 	resolvedHandle := profile.Handle
 
 	rkey, err := s.bskyClient.FollowActor(ctx, did)
 	if err != nil {
-		return false, err
+		return nil, "", err
 	}
 
-	// Persist rkey so we can delete the follow later.
 	_ = s.store.SetKV("bsky_follow_"+did, rkey)
-	// Persist handle for display in the following list.
 	_ = s.store.SetKV("bsky_follow_handle_"+did, resolvedHandle)
 
-	// Key derivation: use plain DID (not "bsky:"+did) to match the key the
-	// poller uses when signing kind-1 replies and kind-0 profiles for this author.
 	pubkey, err := s.actorResolver.PublicKey(did)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if err := s.store.AddFollow(localActorURL, "bsky:"+did); err != nil {
+		slog.Warn("bsky follow: failed to store follow in db", "error", err)
+	}
+
+	s.publishBskyProfileKind0(ctx, profile)
+	return profile, pubkey, nil
+}
+
+// addBskyFollow creates the Bluesky follow record, persists DB state, and
+// publishes a kind-3 contact list. Returns (kind3Published, err): err covers
+// Bluesky API and key derivation failures; kind3Published=false means the
+// Bluesky follow IS active and DB state is correct, only kind-3 distribution
+// failed — the caller can recover via republish-kind3.
+func (s *Server) addBskyFollow(ctx context.Context, handle, localActorURL string) (bool, error) {
+	profile, pubkey, err := s.bskyFollowCore(ctx, handle, localActorURL)
 	if err != nil {
 		return false, err
 	}
 
-	if err := s.store.AddFollow(localActorURL, "bsky:"+did); err != nil {
-		slog.Warn("add bsky follow: failed to store follow in db", "error", err)
-	}
-
-	// Publish a kind-0 profile event for the followed account so Nostr clients
-	// display their name, avatar, bio, and a link back to their Bluesky profile.
-	s.publishBskyProfileKind0(ctx, profile)
-
 	if _, _, err := s.mergeAndPublishKind3(ctx, []string{pubkey}, nil); err != nil {
 		slog.Warn("add bsky follow: kind-3 publish failed (recoverable via republish-kind3)",
-			"handle", resolvedHandle, "did", did, "error", err)
+			"handle", profile.Handle, "did", profile.DID, "error", err)
 		return false, nil
 	}
 
-	slog.Info("add bsky follow: followed and published kind-3", "handle", resolvedHandle, "did", did)
+	slog.Info("add bsky follow: followed and published kind-3", "handle", profile.Handle, "did", profile.DID)
 	return true, nil
 }
 
@@ -372,47 +375,25 @@ func (s *Server) removeBskyFollow(ctx context.Context, handleOrDID, localActorUR
 // publishBskyProfileKind0 publishes a Nostr kind-0 metadata event for a Bluesky
 // profile, signed with the deterministic derived key for that account's DID.
 // This allows Nostr clients to show the account's name, avatar, bio, and a link
-// back to their Bluesky profile. Mirrors the logic in bsky.Poller.publishBskyAuthorProfile.
+// back to their Bluesky profile.
 func (s *Server) publishBskyProfileKind0(ctx context.Context, profile *bsky.Profile) {
 	if s.followPublisher == nil || profile.DID == "" || profile.Handle == "" {
 		return
 	}
 
-	profileURL := "https://bsky.app/profile/" + profile.Handle
-	name := profile.DisplayName
-	if name == "" {
-		name = profile.Handle
-	}
-	about := profileURL
-	if profile.Description != "" {
-		about = profile.Description + "\n\n" + profileURL
-	}
-
-	meta := struct {
-		Name    string `json:"name"`
-		About   string `json:"about"`
-		Picture string `json:"picture,omitempty"`
-		Banner  string `json:"banner,omitempty"`
-		Website string `json:"website"`
-	}{
-		Name:    name,
-		About:   about,
-		Picture: profile.Avatar,
-		Banner:  profile.Banner,
-		Website: profileURL,
-	}
-	metaBytes, err := json.Marshal(meta)
-	if err != nil {
-		slog.Debug("publishBskyProfileKind0: marshal failed", "handle", profile.Handle, "error", err)
-		return
-	}
+	metaContent := bridge.BuildBskyProfileMeta(bridge.BskyProfileMeta{
+		DisplayName: profile.DisplayName,
+		Handle:      profile.Handle,
+		AvatarURL:   profile.Avatar,
+		BannerURL:   profile.Banner,
+		Description: profile.Description,
+	})
 
 	event := &gonostr.Event{
 		Kind:      0,
-		Content:   string(metaBytes),
+		Content:   metaContent,
 		CreatedAt: gonostr.Now(),
 	}
-	// Sign with derived key for DID — same derivation the poller uses.
 	if err := s.followPublisher.Sign(event, profile.DID); err != nil {
 		slog.Debug("publishBskyProfileKind0: sign failed", "handle", profile.Handle, "error", err)
 		return

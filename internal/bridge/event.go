@@ -4,6 +4,7 @@
 package bridge
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -146,6 +147,64 @@ func BuildKind1Event(post NormalizedPost) *nostr.Event {
 		CreatedAt: post.CreatedAt,
 		Tags:      tags,
 	}
+}
+
+// BskyProfileMeta holds the fields needed to build a kind-0 Nostr metadata
+// event for a bridged Bluesky author. Used by both the Poller and the follow
+// management endpoints so Bluesky profiles are rendered consistently.
+type BskyProfileMeta struct {
+	DisplayName string
+	Handle      string
+	AvatarURL   string
+	BannerURL   string
+	Description string
+	LocalDomain string // if set, generates NIP-05: <handle>@<localHost>
+}
+
+// BuildBskyProfileMeta builds the content field of a kind-0 event for a Bluesky
+// profile. Returns a JSON string suitable for use as the .Content of a kind-0.
+func BuildBskyProfileMeta(p BskyProfileMeta) string {
+	profileURL := "https://bsky.app/profile/" + p.Handle
+
+	name := p.DisplayName
+	if name == "" {
+		name = p.Handle
+	}
+
+	about := profileURL
+	if p.Description != "" {
+		about = p.Description + "\n\n" + profileURL
+	}
+
+	var nip05 string
+	if p.LocalDomain != "" {
+		localHost := ExtractHost(p.LocalDomain)
+		if localHost != "" {
+			nip05 = p.Handle + "@" + localHost
+		}
+	}
+
+	meta := struct {
+		Name    string `json:"name"`
+		About   string `json:"about"`
+		Picture string `json:"picture,omitempty"`
+		Banner  string `json:"banner,omitempty"`
+		Website string `json:"website"`
+		NIP05   string `json:"nip05,omitempty"`
+	}{
+		Name:    name,
+		About:   about,
+		Picture: p.AvatarURL,
+		Banner:  p.BannerURL,
+		Website: profileURL,
+		NIP05:   nip05,
+	}
+
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return `{"name":"","about":""}`
+	}
+	return string(b)
 }
 
 // ExtractHost returns the hostname from a URL string

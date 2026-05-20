@@ -111,13 +111,7 @@ func (p *Poster) handleKind1Direct(ctx context.Context, event *nostr.Event) erro
 
 // handleKind1 posts a Nostr note to Bluesky.
 func (p *Poster) handleKind1(ctx context.Context, event *nostr.Event) {
-	// Skip if already bridged to Bluesky.
-	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
-		slog.Debug("bsky: skipping already-bridged note", "id", event.ID)
-		return
-	}
-
-	if err := p.postNote(ctx, event); err != nil {
+	if err := p.handleKind1Direct(ctx, event); err != nil {
 		slog.Warn("bsky: failed to post note", "id", event.ID, "error", err)
 	}
 }
@@ -173,244 +167,89 @@ func (p *Poster) handleKind5Direct(ctx context.Context, event *nostr.Event) erro
 
 // handleKind6 reposts a bridged note on Bluesky.
 func (p *Poster) handleKind6(ctx context.Context, event *nostr.Event) {
-	// Skip if already bridged.
-	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
-		return
-	}
-
-	// Find the reposted event ID.
-	var repostedNostrID string
-	for _, tag := range event.Tags {
-		if len(tag) >= 2 && tag[0] == "e" {
-			repostedNostrID = tag[1]
-			break
-		}
-	}
-	if repostedNostrID == "" {
-		return
-	}
-
-	// Resolve to AT URI.
-	atURI, ok := p.Store.GetAPIDForObject(repostedNostrID)
-	if !ok || !strings.HasPrefix(atURI, "at://") {
-		slog.Debug("bsky: repost target not bridged", "repostedID", repostedNostrID)
-		return
-	}
-
-	rec := RepostRecord{
-		Type:      repostType,
-		Subject:   Ref{URI: atURI},
-		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
-	}
-	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
-		Repo:       p.Client.DID(),
-		Collection: "app.bsky.feed.repost",
-		Record:     rec,
-	})
-	if err != nil {
+	if err := p.handleKind6Direct(ctx, event); err != nil {
 		slog.Warn("bsky: failed to repost", "id", event.ID, "error", err)
-		return
-	}
-	slog.Info("bsky: reposted", "nostrID", event.ID, "atURI", resp.URI)
-	if err := p.Store.AddObject(resp.URI, event.ID); err != nil {
-		slog.Warn("bsky: failed to store repost mapping", "error", err)
 	}
 }
 
 // handleKind7 likes a bridged note on Bluesky.
 func (p *Poster) handleKind7(ctx context.Context, event *nostr.Event) {
-	// Only bridge "+" reactions (not emoji reactions).
-	if event.Content != "+" && event.Content != "" {
-		return
-	}
-
-	// Skip if already bridged.
-	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
-		return
-	}
-
-	// Find the liked event ID.
-	var likedNostrID string
-	for _, tag := range event.Tags {
-		if len(tag) >= 2 && tag[0] == "e" {
-			likedNostrID = tag[1]
-			break
-		}
-	}
-	if likedNostrID == "" {
-		return
-	}
-
-	// Resolve to AT URI.
-	atURI, ok := p.Store.GetAPIDForObject(likedNostrID)
-	if !ok || !strings.HasPrefix(atURI, "at://") {
-		slog.Debug("bsky: like target not bridged", "likedID", likedNostrID)
-		return
-	}
-
-	rec := LikeRecord{
-		Type:      likeType,
-		Subject:   Ref{URI: atURI},
-		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
-	}
-	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
-		Repo:       p.Client.DID(),
-		Collection: "app.bsky.feed.like",
-		Record:     rec,
-	})
-	if err != nil {
+	if err := p.handleKind7Direct(ctx, event); err != nil {
 		slog.Warn("bsky: failed to like", "id", event.ID, "error", err)
-		return
 	}
-	slog.Info("bsky: liked", "nostrID", event.ID, "atURI", resp.URI)
-	if err := p.Store.AddObject(resp.URI, event.ID); err != nil {
-		slog.Warn("bsky: failed to store like mapping", "error", err)
-	}
-}
-
-// handleKind6Direct is like handleKind6 but returns errors for outbox retry.
-func (p *Poster) handleKind6Direct(ctx context.Context, event *nostr.Event) error {
-	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
-		return nil
-	}
-	var repostedNostrID string
-	for _, tag := range event.Tags {
-		if len(tag) >= 2 && tag[0] == "e" {
-			repostedNostrID = tag[1]
-			break
-		}
-	}
-	if repostedNostrID == "" {
-		return nil
-	}
-	atURI, ok := p.Store.GetAPIDForObject(repostedNostrID)
-	if !ok || !strings.HasPrefix(atURI, "at://") {
-		return nil // target not bridged, not retryable
-	}
-	rec := RepostRecord{
-		Type:      repostType,
-		Subject:   Ref{URI: atURI},
-		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
-	}
-	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
-		Repo:       p.Client.DID(),
-		Collection: "app.bsky.feed.repost",
-		Record:     rec,
-	})
-	if err != nil {
-		return err
-	}
-	p.Store.AddObject(resp.URI, event.ID)
-	return nil
-}
-
-// handleKind7Direct is like handleKind7 but returns errors for outbox retry.
-func (p *Poster) handleKind7Direct(ctx context.Context, event *nostr.Event) error {
-	if event.Content != "+" && event.Content != "" {
-		return nil
-	}
-	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
-		return nil
-	}
-	var likedNostrID string
-	for _, tag := range event.Tags {
-		if len(tag) >= 2 && tag[0] == "e" {
-			likedNostrID = tag[1]
-			break
-		}
-	}
-	if likedNostrID == "" {
-		return nil
-	}
-	atURI, ok := p.Store.GetAPIDForObject(likedNostrID)
-	if !ok || !strings.HasPrefix(atURI, "at://") {
-		return nil // target not bridged, not retryable
-	}
-	rec := LikeRecord{
-		Type:      likeType,
-		Subject:   Ref{URI: atURI},
-		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
-	}
-	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
-		Repo:       p.Client.DID(),
-		Collection: "app.bsky.feed.like",
-		Record:     rec,
-	})
-	if err != nil {
-		return err
-	}
-	p.Store.AddObject(resp.URI, event.ID)
-	return nil
 }
 
 // handleKind9735 bridges a zap receipt as a Bluesky like.
 func (p *Poster) handleKind9735(ctx context.Context, event *nostr.Event) {
-	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
-		return
-	}
-	var zappedNostrID string
-	for _, tag := range event.Tags {
-		if len(tag) >= 2 && tag[0] == "e" {
-			zappedNostrID = tag[1]
-			break
-		}
-	}
-	if zappedNostrID == "" {
-		return
-	}
-	atURI, ok := p.Store.GetAPIDForObject(zappedNostrID)
-	if !ok || !strings.HasPrefix(atURI, "at://") {
-		return
-	}
-	rec := LikeRecord{
-		Type:      likeType,
-		Subject:   Ref{URI: atURI},
-		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
-	}
-	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
-		Repo:       p.Client.DID(),
-		Collection: "app.bsky.feed.like",
-		Record:     rec,
-	})
-	if err != nil {
+	if err := p.handleKind9735Direct(ctx, event); err != nil {
 		slog.Warn("bsky: failed to bridge zap as like", "id", event.ID, "error", err)
-		return
 	}
-	p.Store.AddObject(resp.URI, event.ID)
 }
 
-// handleKind9735Direct is like handleKind9735 but returns errors for outbox retry.
+// handleKind6Direct reposts a bridged note on Bluesky, returning errors for outbox retry.
+func (p *Poster) handleKind6Direct(ctx context.Context, event *nostr.Event) error {
+	return p.resolveAndCreateLikeOrRepost(ctx, event, "app.bsky.feed.repost", repostType)
+}
+
+// handleKind7Direct likes a bridged note on Bluesky, returning errors for outbox retry.
+func (p *Poster) handleKind7Direct(ctx context.Context, event *nostr.Event) error {
+	// Only bridge "+" reactions (not emoji reactions).
+	if event.Content != "+" && event.Content != "" {
+		return nil
+	}
+	return p.resolveAndCreateLikeOrRepost(ctx, event, "app.bsky.feed.like", likeType)
+}
+
+// handleKind9735Direct bridges a zap receipt as a Bluesky like, returning errors for outbox retry.
 func (p *Poster) handleKind9735Direct(ctx context.Context, event *nostr.Event) error {
+	return p.resolveAndCreateLikeOrRepost(ctx, event, "app.bsky.feed.like", likeType)
+}
+
+// resolveAndCreateLikeOrRepost resolves a target Nostr event ID from e-tags to an
+// AT URI and creates a Bluesky repo record (repost or like).
+// Returns nil on success or on non-retryable skips (already bridged, no target, not bridged).
+func (p *Poster) resolveAndCreateLikeOrRepost(ctx context.Context, event *nostr.Event, collection, recordType string) error {
 	if _, exists := p.Store.GetAPIDForObject(event.ID); exists {
 		return nil
 	}
-	var zappedNostrID string
+
+	var targetNostrID string
 	for _, tag := range event.Tags {
 		if len(tag) >= 2 && tag[0] == "e" {
-			zappedNostrID = tag[1]
+			targetNostrID = tag[1]
 			break
 		}
 	}
-	if zappedNostrID == "" {
+	if targetNostrID == "" {
 		return nil
 	}
-	atURI, ok := p.Store.GetAPIDForObject(zappedNostrID)
+
+	atURI, ok := p.Store.GetAPIDForObject(targetNostrID)
 	if !ok || !strings.HasPrefix(atURI, "at://") {
-		return nil
+		return nil // target not bridged, not retryable
 	}
-	rec := LikeRecord{
-		Type:      likeType,
+
+	type baseRecord struct {
+		Type      string `json:"$type"`
+		Subject   Ref    `json:"subject"`
+		CreatedAt string `json:"createdAt"`
+	}
+	rec := baseRecord{
+		Type:      recordType,
 		Subject:   Ref{URI: atURI},
 		CreatedAt: event.CreatedAt.Time().UTC().Format(time.RFC3339),
 	}
+
 	resp, err := p.Client.CreateRecord(ctx, CreateRecordRequest{
 		Repo:       p.Client.DID(),
-		Collection: "app.bsky.feed.like",
+		Collection: collection,
 		Record:     rec,
 	})
 	if err != nil {
 		return err
 	}
+
+	slog.Info("bsky: created record", "nostrID", event.ID, "atURI", resp.URI)
 	p.Store.AddObject(resp.URI, event.ID)
 	return nil
 }

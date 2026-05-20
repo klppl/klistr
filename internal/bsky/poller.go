@@ -2,7 +2,6 @@ package bsky
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -624,26 +623,21 @@ func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayN
 		p.pollSeenDIDs[did] = struct{}{}
 	}
 
-	profileURL := "https://bsky.app/profile/" + handle
-	name := displayName
-	if name == "" {
-		name = handle
+	meta := bridge.BskyProfileMeta{
+		DisplayName: displayName,
+		Handle:      handle,
+		LocalDomain: p.LocalDomain,
 	}
-
-	// Default bio is just the profile link; replaced with the real bio if the
-	// full profile fetch succeeds.
-	about := profileURL
-	var avatarURL, bannerURL string
 
 	if profile, err := p.Client.GetProfile(ctx, did); err == nil {
 		if profile.DisplayName != "" {
-			name = profile.DisplayName
+			meta.DisplayName = profile.DisplayName
 		}
 		if profile.Description != "" {
-			about = profile.Description + "\n\n" + profileURL
+			meta.Description = profile.Description
 		}
-		avatarURL = profile.Avatar
-		bannerURL = profile.Banner
+		meta.AvatarURL = profile.Avatar
+		meta.BannerURL = profile.Banner
 	} else {
 		slog.Debug("bsky poller: could not fetch full profile, using minimal metadata",
 			"handle", handle, "error", err)
@@ -655,45 +649,18 @@ func (p *Poller) publishAuthorProfile(ctx context.Context, did, handle, displayN
 		slog.Debug("bsky poller: failed to store handle→DID mapping", "handle", handle, "error", err)
 	}
 
-	// Build NIP-05 identifier: "<handle>@<localHost>" e.g. "alice.bsky.social@yourdomain.com"
-	var nip05 string
-	if p.LocalDomain != "" {
-		localHost := bridge.ExtractHost(p.LocalDomain)
-		if localHost != "" {
-			nip05 = handle + "@" + localHost
-		}
-	}
+	metaContent := bridge.BuildBskyProfileMeta(meta)
 
-	profileMeta := struct {
-		Name    string `json:"name"`
-		About   string `json:"about"`
-		Picture string `json:"picture,omitempty"`
-		Banner  string `json:"banner,omitempty"`
-		Website string `json:"website"`
-		NIP05   string `json:"nip05,omitempty"`
-	}{
-		Name:    name,
-		About:   about,
-		Picture: avatarURL,
-		Banner:  bannerURL,
-		Website: profileURL,
-		NIP05:   nip05,
-	}
-	metaBytes, err := json.Marshal(profileMeta)
-	if err != nil {
-		return
-	}
-
-	meta := &nostr.Event{
+	event := &nostr.Event{
 		Kind:      0,
-		Content:   string(metaBytes),
+		Content:   metaContent,
 		CreatedAt: nostr.Now(),
 	}
 
-	if err := p.Signer.Sign(meta, did); err != nil {
+	if err := p.Signer.Sign(event, did); err != nil {
 		return
 	}
-	if err := p.Publisher.Publish(ctx, meta); err != nil {
+	if err := p.Publisher.Publish(ctx, event); err != nil {
 		slog.Debug("bsky poller: failed to publish author profile", "handle", handle, "error", err)
 	}
 }

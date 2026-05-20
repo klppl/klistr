@@ -49,19 +49,7 @@ type relayManagerAdapter struct {
 
 func (a *relayManagerAdapter) Relays() []string { return a.publisher.Relays() }
 
-func (a *relayManagerAdapter) RelayStatuses() []server.RelayStatus {
-	src := a.publisher.RelayStatuses()
-	out := make([]server.RelayStatus, len(src))
-	for i, s := range src {
-		out[i] = server.RelayStatus{
-			URL:               s.URL,
-			CircuitOpen:       s.CircuitOpen,
-			FailCount:         s.FailCount,
-			CooldownRemaining: s.CooldownRemaining,
-		}
-	}
-	return out
-}
+func (a *relayManagerAdapter) RelayStatuses() []nostrpkg.RelayStatus { return a.publisher.RelayStatuses() }
 
 func (a *relayManagerAdapter) AddRelay(url string) bool {
 	added := a.publisher.AddRelay(url)

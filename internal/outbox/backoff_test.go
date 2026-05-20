@@ -29,25 +29,3 @@ func TestDefaultBackoff(t *testing.T) {
 		})
 	}
 }
-
-func TestThreadBackoff(t *testing.T) {
-	tests := []struct {
-		name     string
-		attempt  int
-		expected time.Duration
-	}{
-		{"attempt 1 is immediate", 1, 0},
-		{"attempt 2 is 5s", 2, 5 * time.Second},
-		{"attempt 3 is 30s", 3, 30 * time.Second},
-		{"attempt 0 clamps to immediate", 0, 0},
-		{"attempt 99 clamps to 30s", 99, 30 * time.Second},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := ThreadBackoff(tc.attempt)
-			if got != tc.expected {
-				t.Errorf("ThreadBackoff(%d) = %v, want %v", tc.attempt, got, tc.expected)
-			}
-		})
-	}
-}

@@ -164,7 +164,7 @@ func (r *AccountResyncer) resyncOne(ctx context.Context, actorURL string) error 
 		return err
 	}
 
-	meta := buildMetadataContentFromActor(actor, r.LocalDomain)
+	meta := buildMetadataContent(actor, r.LocalDomain)
 	event := &nostr.Event{
 		Kind:      0,
 		Content:   meta,

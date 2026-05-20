@@ -884,7 +884,7 @@ func (h *APHandler) fetchAndCacheActor(ctx context.Context, actorID string) {
 	}
 
 	// Publish metadata event to Nostr using derived key for remote actors.
-	meta := buildMetadataContentFromActor(actor, h.LocalDomain)
+	meta := buildMetadataContent(actor, h.LocalDomain)
 	event := &nostr.Event{
 		Kind:      0,
 		Content:   meta,
@@ -1284,10 +1284,6 @@ func buildMetadataContent(actor *Actor, localDomain string) string {
 		return `{"name":"","about":""}`
 	}
 	return string(b)
-}
-
-func buildMetadataContentFromActor(actor *Actor, localDomain string) string {
-	return buildMetadataContent(actor, localDomain)
 }
 
 // anchorHrefRe matches the href attribute value inside an <a> tag,

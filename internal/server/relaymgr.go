@@ -12,20 +12,12 @@ import (
 	nostrpkg "github.com/klppl/klistr/internal/nostr"
 )
 
-// RelayStatus describes a relay and its circuit-breaker state (used in the admin API response).
-type RelayStatus struct {
-	URL               string `json:"url"`
-	CircuitOpen       bool   `json:"circuit_open"`
-	FailCount         int    `json:"fail_count"`
-	CooldownRemaining int    `json:"cooldown_remaining_secs,omitempty"`
-}
-
 // RelayManager provides relay management for the /web admin API.
 type RelayManager interface {
 	// Relays returns the current relay list.
 	Relays() []string
 	// RelayStatuses returns circuit-breaker state for all configured relays.
-	RelayStatuses() []RelayStatus
+	RelayStatuses() []nostrpkg.RelayStatus
 	// AddRelay adds a relay. Returns false if already present.
 	AddRelay(url string) bool
 	// RemoveRelay removes a relay. Returns false if not found.
@@ -42,12 +34,12 @@ type RelayManager interface {
 
 func (s *Server) handleGetRelays(w http.ResponseWriter, r *http.Request) {
 	if s.relayManager == nil {
-		jsonResponse(w, []RelayStatus{}, http.StatusOK)
+		jsonResponse(w, []nostrpkg.RelayStatus{}, http.StatusOK)
 		return
 	}
 	statuses := s.relayManager.RelayStatuses()
 	if statuses == nil {
-		statuses = []RelayStatus{}
+		statuses = []nostrpkg.RelayStatus{}
 	}
 	jsonResponse(w, statuses, http.StatusOK)
 }

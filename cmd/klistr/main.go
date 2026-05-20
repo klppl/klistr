@@ -428,9 +428,11 @@ func main() {
 			return fmt.Errorf("unmarshal nostr event: %w", err)
 		}
 
-		// Fast-fail: if this relay is known to restrict this kind, dead-letter immediately.
+		// Fast-fail: if this relay is already known to restrict this kind, drop the
+		// item quietly. The restriction was logged once when first learned, so a
+		// per-item warning here would just flood the log when a backlog drains.
 		if !publisher.IsKindAllowed(item.DestURL, event.Kind) {
-			return fmt.Errorf("%w: relay restricts kind %d", outbox.ErrPermanentFailure, event.Kind)
+			return fmt.Errorf("%w: relay restricts kind %d", outbox.ErrDropSilently, event.Kind)
 		}
 
 		publishCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

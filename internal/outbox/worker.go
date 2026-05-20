@@ -18,6 +18,14 @@ var ErrCircuitOpen = errors.New("circuit open")
 // The worker dead-letters the item immediately without retrying.
 var ErrPermanentFailure = errors.New("permanent failure")
 
+// ErrDropSilently is returned by delivery functions when an item can never be
+// delivered for a reason that is already known and non-actionable — e.g. the
+// relay is known to restrict this event kind. The worker marks the item done
+// (removing it from the queue) without dead-lettering or logging a warning,
+// avoiding log floods and dead-letter-table pollution when a large backlog of
+// such items drains at once.
+var ErrDropSilently = errors.New("drop silently")
+
 // DeliverFunc is the signature for protocol-specific delivery logic.
 type DeliverFunc func(ctx context.Context, item Item) error
 
@@ -206,6 +214,19 @@ func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
 			// Circuit is open — reschedule silently without burning an attempt.
 			// The circuit breaker will recover on its own (5 min cooldown).
 			wp.queue.Reschedule(item.ID, 5*time.Minute)
+			return
+		}
+		if errors.Is(err, ErrDropSilently) {
+			// Known, non-actionable: drop without warning or dead-lettering.
+			slog.Debug("outbox dropping undeliverable item",
+				"dest_type", item.DestType,
+				"dest_url", item.DestURL,
+				"id", item.ID,
+				"reason", err,
+			)
+			if doneErr := wp.queue.Complete(item.ID); doneErr != nil {
+				slog.Warn("outbox drop update error", "id", item.ID, "error", doneErr)
+			}
 			return
 		}
 		if errors.Is(err, ErrPermanentFailure) {

@@ -108,6 +108,20 @@ const reapStaleAge = 5 * time.Minute
 // reapStaleInterval is how often the reaper goroutine checks for abandoned rows.
 const reapStaleInterval = 60 * time.Second
 
+// circuitOpenBackoff is how far out a circuit-open item is rescheduled. It must
+// be comfortably larger than the worker's poll interval so a backlog of items
+// bound for a down destination leaves the "due now" set quickly instead of
+// being re-claimed on the next tick.
+const circuitOpenBackoff = 5 * time.Minute
+
+// maxCircuitOpenAge bounds how long an item may stay undeliverable purely
+// because its destination's circuit is open. Past this age the item is dead-
+// lettered instead of rescheduled. Without this cap a destination that stays
+// down (e.g. a dead relay) grows an unbounded backlog — circuit-open
+// reschedules never increment attempts, so such items would otherwise never
+// age out, and the ever-growing due set pins the CPU.
+const maxCircuitOpenAge = 24 * time.Hour
+
 // Start launches all worker goroutines. Non-blocking — returns immediately.
 // Workers run until ctx is cancelled. Also starts a single reaper goroutine
 // that periodically calls Queue.ReapStale to recover rows abandoned by crashed
@@ -184,7 +198,15 @@ func (wp *WorkerPool) runWorker(ctx context.Context, destType string, workerID i
 				break
 			}
 
-			wp.deliver(ctx, item)
+			if wp.deliver(ctx, item) {
+				// A destination on this lane has its circuit open. Stop draining
+				// and sleep: continuing would spin through the entire backlog of
+				// items bound for the same down destination, pinning the CPU.
+				// The item we just hit was rescheduled out of the due set, and a
+				// notify (on the next enqueue) or the fallback tick re-checks the
+				// lane shortly — so healthy destinations resume promptly.
+				break
+			}
 		}
 
 		// Sleep until notified or the fallback ticker fires.
@@ -197,7 +219,11 @@ func (wp *WorkerPool) runWorker(ctx context.Context, destType string, workerID i
 	}
 }
 
-func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
+// deliver runs the registered deliverer for an item and records the outcome.
+// It returns true when the item's destination has its circuit open, signalling
+// the worker to stop draining this lane (see runWorker) so a backlog bound for
+// a down destination can't spin the CPU.
+func (wp *WorkerPool) deliver(ctx context.Context, item Item) (circuitOpen bool) {
 	wp.mu.RLock()
 	fn, ok := wp.deliverers[item.DestType]
 	wp.mu.RUnlock()
@@ -205,16 +231,29 @@ func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
 	if !ok {
 		slog.Warn("outbox: no deliverer for dest_type", "dest_type", item.DestType, "id", item.ID)
 		wp.queue.Fail(item.ID, "no deliverer registered for "+item.DestType)
-		return
+		return false
 	}
 
 	err := fn(ctx, item)
 	if err != nil {
 		if errors.Is(err, ErrCircuitOpen) {
-			// Circuit is open — reschedule silently without burning an attempt.
-			// The circuit breaker will recover on its own (5 min cooldown).
-			wp.queue.Reschedule(item.ID, 5*time.Minute)
-			return
+			// Circuit is open. Don't burn an attempt — but give up entirely on
+			// items that have been undeliverable for too long, so a destination
+			// that stays down can't grow an unbounded backlog.
+			if !item.CreatedAt.IsZero() && time.Since(item.CreatedAt) > maxCircuitOpenAge {
+				slog.Warn("outbox: dropping stale item, destination unreachable too long",
+					"dest_type", item.DestType,
+					"dest_url", item.DestURL,
+					"id", item.ID,
+					"age", time.Since(item.CreatedAt).Round(time.Minute),
+				)
+				if killErr := wp.queue.Kill(item.ID, "circuit open beyond max age: "+item.DestURL); killErr != nil {
+					slog.Warn("outbox kill update error", "id", item.ID, "error", killErr)
+				}
+			} else {
+				wp.queue.Reschedule(item.ID, circuitOpenBackoff)
+			}
+			return true
 		}
 		if errors.Is(err, ErrDropSilently) {
 			// Known, non-actionable: drop without warning or dead-lettering.
@@ -263,4 +302,5 @@ func (wp *WorkerPool) deliver(ctx context.Context, item Item) {
 		"dest_url", item.DestURL,
 		"id", item.ID,
 	)
+	return false
 }

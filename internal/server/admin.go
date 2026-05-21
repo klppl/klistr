@@ -1309,7 +1309,10 @@ async function loadRelays() {
       row.dataset.url = relay.url;
       let dotColor = 'var(--green)';
       let badge = '<span class="relay-cb relay-cb-ok">ok</span>';
-      if (relay.circuit_open) {
+      if (relay.quarantined) {
+        dotColor = 'var(--red)';
+        badge = '<span class="relay-cb relay-cb-open">auto-disabled · unreachable</span>';
+      } else if (relay.circuit_open) {
         dotColor = 'var(--red)';
         const secs = relay.cooldown_remaining_secs||0;
         const cd = secs > 60 ? Math.floor(secs/60)+'m '+String(secs%60).padStart(2,'0')+'s' : secs+'s';
@@ -1319,7 +1322,7 @@ async function loadRelays() {
         badge = '<span class="relay-cb relay-cb-warn">'+relay.fail_count+' fail(s)</span>';
       }
       const resetBtn = (relay.circuit_open || relay.fail_count > 0)
-        ? '<button class="rbtn rbtn-blue" onclick="resetCircuit(\''+esc(relay.url)+'\')">Reset</button>'
+        ? '<button class="rbtn rbtn-blue" onclick="resetCircuit(\''+esc(relay.url)+'\')">'+(relay.quarantined?'Re-enable':'Reset')+'</button>'
         : '';
       row.innerHTML =
         '<span class="relay-dot" style="background:'+dotColor+'"></span>'+

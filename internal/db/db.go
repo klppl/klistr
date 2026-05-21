@@ -156,6 +156,12 @@ var commonMigrations = []string{
 		claimed_at      TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`,
+	// outbox_claim matches the Claim() probe exactly: equality on (dest_type,
+	// status), then ORDER BY priority, next_retry_at. Without dest_type in the
+	// leading columns the planner falls back to scanning the entire overdue set
+	// on every probe — which pins the CPU once a backlog builds up (e.g. a relay
+	// going unreachable). This index turns each probe into a short index seek.
+	`CREATE INDEX IF NOT EXISTS outbox_claim ON outbox(dest_type, status, priority, next_retry_at)`,
 }
 
 // postMigrations runs after commonMigrations and contains statements that may
@@ -194,6 +200,12 @@ var postMigrations = []struct {
 			ON outbox(dest_type, dest_url, source_event_id)
 			WHERE source_event_id IS NOT NULL AND source_event_id != ''`,
 		ignoreSubs: []string{"already exists"},
+	},
+	// outbox_drain is superseded by outbox_claim (which leads with dest_type and
+	// orders correctly for the probe). Drop it so inserts don't pay to maintain a
+	// redundant index. Safe on DBs where it never existed.
+	{
+		sql: `DROP INDEX IF EXISTS outbox_drain`,
 	},
 }
 

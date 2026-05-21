@@ -66,21 +66,30 @@ func SetCircuitBreakerThreshold(n int) {
 	}
 }
 
+// quarantineAfter is how long a relay may fail continuously before it is
+// auto-disabled ("quarantined"). A quarantined relay is skipped for both
+// publishing and enqueuing — so a permanently-dead relay can't grow an outbox
+// backlog — until it is manually re-enabled (ResetCircuit, e.g. the /web reset
+// button) or a restart gives it a fresh attempt. Overridable in tests.
+var quarantineAfter = 1 * time.Hour
+
 // relayCircuit is a per-relay circuit breaker.
 type relayCircuit struct {
-	mu              sync.Mutex
-	failCount       int
-	openedAt        time.Time
-	open            bool
-	permanentOpen   bool           // true when relay requires PoW; stays open until manual reset
-	restrictedKinds map[int]struct{} // kind -> exists
+	mu               sync.Mutex
+	failCount        int
+	openedAt         time.Time
+	open             bool
+	permanentOpen    bool             // true when relay requires PoW; stays open until manual reset
+	quarantined      bool             // true when auto-disabled after sustained failure; stays open until manual reset
+	unreachableSince time.Time        // start of the current continuous-failure streak; zero when healthy
+	restrictedKinds  map[int]struct{} // kind -> exists
 }
 
 // isOpen returns true when the circuit is open (relay should be bypassed).
 func (cb *relayCircuit) isOpen() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	if cb.permanentOpen {
+	if cb.permanentOpen || cb.quarantined {
 		return true
 	}
 	if !cb.open {
@@ -92,6 +101,15 @@ func (cb *relayCircuit) isOpen() bool {
 		return false
 	}
 	return true
+}
+
+// isDisabled reports whether the relay is disabled until manual reset — either
+// a PoW lock or an auto-quarantine. Disabled relays are skipped when enqueuing
+// so a dead relay can't accumulate an outbox backlog.
+func (cb *relayCircuit) isDisabled() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.permanentOpen || cb.quarantined
 }
 
 // isKindAllowed returns true if the given Nostr kind is NOT currently
@@ -127,36 +145,56 @@ func (cb *relayCircuit) openForPoW() {
 	cb.failCount = cbThreshold
 }
 
-// recordFailure increments the counter and opens the circuit at threshold.
-// Returns true the first time the circuit opens.
-func (cb *relayCircuit) recordFailure() bool {
+// recordFailure increments the counter, opens the circuit at threshold, and
+// auto-quarantines the relay once it has been failing continuously for longer
+// than quarantineAfter. The streak is tracked via unreachableSince, which is
+// set on the first failure and cleared only by a success — so it spans the
+// open→cooldown→half-open→fail cycles of a sustained outage. Returns whether
+// the circuit just opened and whether it was just quarantined (mutually
+// exclusive; quarantine takes precedence).
+func (cb *relayCircuit) recordFailure() (opened, quarantined bool) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	if cb.unreachableSince.IsZero() {
+		cb.unreachableSince = time.Now()
+	}
 	cb.failCount++
+	if !cb.permanentOpen && !cb.quarantined && time.Since(cb.unreachableSince) >= quarantineAfter {
+		cb.open = true
+		cb.quarantined = true
+		cb.openedAt = time.Now()
+		return false, true
+	}
 	if !cb.open && cb.failCount >= cbThreshold {
 		cb.open = true
 		cb.openedAt = time.Now()
-		return true
+		return true, false
 	}
-	return false
+	return false, false
 }
 
-// recordSuccess resets all failure state. Returns true if the circuit was open.
+// recordSuccess resets all transient failure state (not the PoW/quarantine
+// locks, which a success can't reach since they bypass delivery). Returns true
+// if the circuit was open.
 func (cb *relayCircuit) recordSuccess() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	was := cb.open || cb.failCount > 0
 	cb.open = false
 	cb.failCount = 0
+	cb.unreachableSince = time.Time{}
 	return was
 }
 
-// reset forcefully clears the circuit breaker state, including any permanent PoW lock.
+// reset forcefully clears the circuit breaker state, including any permanent PoW
+// lock or auto-quarantine.
 func (cb *relayCircuit) reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.open = false
 	cb.permanentOpen = false
+	cb.quarantined = false
+	cb.unreachableSince = time.Time{}
 	cb.failCount = 0
 }
 
@@ -164,6 +202,7 @@ func (cb *relayCircuit) reset() {
 type RelayStatus struct {
 	URL               string `json:"url"`
 	CircuitOpen       bool   `json:"circuit_open"`
+	Quarantined       bool   `json:"quarantined,omitempty"`
 	FailCount         int    `json:"fail_count"`
 	CooldownRemaining int    `json:"cooldown_remaining_secs,omitempty"`
 }
@@ -171,9 +210,9 @@ type RelayStatus struct {
 func (cb *relayCircuit) status(url string) RelayStatus {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	open := cb.permanentOpen || (cb.open && time.Since(cb.openedAt) < cbCooldown)
+	open := cb.permanentOpen || cb.quarantined || (cb.open && time.Since(cb.openedAt) < cbCooldown)
 	var remaining int
-	if open && !cb.permanentOpen {
+	if open && !cb.permanentOpen && !cb.quarantined {
 		r := cbCooldown - time.Since(cb.openedAt)
 		if r > 0 {
 			remaining = int(r.Seconds())
@@ -182,6 +221,7 @@ func (cb *relayCircuit) status(url string) RelayStatus {
 	return RelayStatus{
 		URL:               url,
 		CircuitOpen:       open,
+		Quarantined:       cb.quarantined,
 		FailCount:         cb.failCount,
 		CooldownRemaining: remaining,
 	}
@@ -505,6 +545,13 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 			priority = 2
 		}
 		for _, url := range allRelays {
+			// Skip relays that are disabled until manual reset (PoW lock or
+			// auto-quarantine). Enqueuing for a dead relay is what lets the outbox
+			// backlog grow without bound, so never queue work we won't attempt.
+			if p.getCircuit(url).isDisabled() {
+				slog.Debug("skipping disabled relay for enqueue", "relay", url, "kind", event.Kind)
+				continue
+			}
 			if !p.IsKindAllowed(url, event.Kind) {
 				slog.Debug("skipping relay: kind not allowed", "relay", url, "kind", event.Kind)
 				continue
@@ -571,8 +618,11 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) error {
 				slog.Debug("relay rejected event by policy", "relay", result.RelayURL, "id", event.ID, "error", result.Error)
 				failed++ // Count as publish failure for this specific event
 			} else {
-				justOpened := cb.recordFailure()
-				if justOpened {
+				justOpened, justQuarantined := cb.recordFailure()
+				if justQuarantined {
+					slog.Warn("relay auto-disabled after sustained failure; re-enable via /web reset, or restart to retry",
+						"relay", result.RelayURL, "unreachable_for", quarantineAfter, "error", result.Error)
+				} else if justOpened {
 					slog.Warn("relay circuit opened; will retry in 5 minutes",
 						"relay", result.RelayURL, "error", result.Error)
 				} else if st := cb.status(result.RelayURL); !st.CircuitOpen {
@@ -647,7 +697,13 @@ func (p *Publisher) RecordRelayResult(relayURL string, err error) {
 	}
 
 	if !isPolicyRejection(err) {
-		cb.recordFailure()
+		justOpened, justQuarantined := cb.recordFailure()
+		if justQuarantined {
+			slog.Warn("relay auto-disabled after sustained failure; re-enable via /web reset, or restart to retry",
+				"relay", relayURL, "unreachable_for", quarantineAfter, "error", err)
+		} else if justOpened {
+			slog.Warn("relay circuit opened; will retry in 5 minutes", "relay", relayURL, "error", err)
+		}
 	}
 }
 

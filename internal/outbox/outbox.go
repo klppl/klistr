@@ -102,6 +102,12 @@ func (q *Queue) Migrate() error {
 	if _, err := q.db.Exec(`CREATE INDEX IF NOT EXISTS outbox_drain ON outbox(status, next_retry_at, priority)`); err != nil {
 		return err
 	}
+	// outbox_claim matches the Claim() probe (dest_type, status equality +
+	// priority, next_retry_at ordering) so a probe is a seek, not a scan of the
+	// whole overdue backlog. See the matching migration in internal/db.
+	if _, err := q.db.Exec(`CREATE INDEX IF NOT EXISTS outbox_claim ON outbox(dest_type, status, priority, next_retry_at)`); err != nil {
+		return err
+	}
 
 	// Collapse any pre-existing duplicate rows so the unique index can be
 	// created. Keep the oldest row per (dest_type, dest_url, source_event_id)

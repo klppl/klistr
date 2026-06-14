@@ -384,3 +384,17 @@ func TestBuildSelfLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestDIDFromATURI(t *testing.T) {
+	cases := map[string]string{
+		"at://did:plc:abc123/app.bsky.feed.post/xyz":     "did:plc:abc123",
+		"at://did:web:example.com/app.bsky.feed.post/3k": "did:web:example.com",
+		"at://did:plc:abc123":                            "did:plc:abc123",
+		"":                                               "",
+	}
+	for uri, want := range cases {
+		if got := didFromATURI(uri); got != want {
+			t.Errorf("didFromATURI(%q) = %q, want %q", uri, got, want)
+		}
+	}
+}

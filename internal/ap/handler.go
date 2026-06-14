@@ -571,7 +571,7 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 	}
 
 	// Resolve reply threading and the NIP-10 thread root.
-	var replyToEventID, rootEventID string
+	var replyToEventID, rootEventID, replyToPubkey, rootPubkey string
 	if note.InReplyTo != "" {
 		if id, ok := h.resolveNostrID(note.InReplyTo); ok {
 			replyToEventID = id
@@ -590,8 +590,19 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 					break
 				}
 				parentNote := mapToNote(parentObj)
-				if parentNote == nil || parentNote.InReplyTo == "" {
-					break // reached the root — currentURL is the root post
+				if parentNote == nil {
+					break
+				}
+				// The first hop is the direct parent: capture its author for the
+				// NIP-10 reply p-tag (so the replied-to user is notified).
+				if depth == 0 {
+					replyToPubkey = h.pubkeyForActor(parentNote.AttributedTo)
+					rootPubkey = replyToPubkey
+				}
+				if parentNote.InReplyTo == "" {
+					// currentURL's note is the thread root.
+					rootPubkey = h.pubkeyForActor(parentNote.AttributedTo)
+					break
 				}
 				if visited[parentNote.InReplyTo] {
 					slog.Debug("reply chain cycle detected, stopping walk",
@@ -604,6 +615,16 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 					rootEventID = ancestorID
 				}
 				currentURL = parentNote.InReplyTo
+			}
+
+			// Fall back to the local user as the replied-to author when the parent
+			// is one of our own Nostr objects (FetchObject on a local URL may not
+			// have yielded an author above).
+			if replyToPubkey == "" && IsLocalID(note.InReplyTo, h.LocalDomain) {
+				replyToPubkey = h.Signer.LocalPublicKey()
+			}
+			if rootPubkey == "" {
+				rootPubkey = replyToPubkey
 			}
 		} else {
 			// Parent is unresolvable even after the pre-fetch in handleCreate.
@@ -728,6 +749,8 @@ func (h *APHandler) noteToEvent(ctx context.Context, note *Note) (*nostr.Event, 
 		Images:         images,
 		ReplyToEventID: replyToEventID,
 		RootEventID:    rootEventID,
+		ReplyToPubkey:  replyToPubkey,
+		RootPubkey:     rootPubkey,
 		RelayHint:      h.NostrRelay,
 		MentionPubkeys: mentionPubkeys,
 		QuoteEventID:   quoteEventID,
@@ -758,6 +781,23 @@ func (h *APHandler) resolveNostrID(apObjectID string) (string, bool) {
 		return strings.TrimPrefix(apObjectID, localPrefix), true
 	}
 	return h.Store.GetNostrIDForObject(apObjectID)
+}
+
+// pubkeyForActor returns the Nostr public key for an AP actor URL: the local
+// user's real key when the actor is the local actor, otherwise the deterministic
+// derived key. Returns "" when the actor URL is empty or derivation fails.
+func (h *APHandler) pubkeyForActor(actorURL string) string {
+	if actorURL == "" {
+		return ""
+	}
+	if actorURL == h.LocalActorURL {
+		return h.Signer.LocalPublicKey()
+	}
+	pk, err := h.Signer.PublicKey(actorURL)
+	if err != nil {
+		return ""
+	}
+	return pk
 }
 
 // questionToEvent converts an AP Question (poll) to a Nostr kind-1068 poll event (NIP-69).
@@ -898,18 +938,48 @@ func (h *APHandler) fetchAndCacheActor(ctx context.Context, actorID string) {
 	}
 }
 
+// maxBridgeDepth bounds the recursive ancestor-bridging walk so a long (or
+// maliciously cyclic) reply chain cannot trigger unbounded fetches.
+const maxBridgeDepth = 10
+
 func (h *APHandler) fetchAndCacheObject(ctx context.Context, objectID string) {
-	if IsLocalID(objectID, h.LocalDomain) {
-		return
+	h.ensureObjectBridged(ctx, objectID, 0)
+}
+
+// ensureObjectBridged fetches an AP object and bridges it — together with its
+// full ancestor chain — to Nostr, returning the resulting Nostr event ID.
+//
+// Ancestors are bridged *first* (depth-first up the inReplyTo chain) so that by
+// the time a child note is converted, its parent already has a Nostr event ID
+// and noteToEvent can attach proper reply tags instead of dropping the note.
+// Without this, a reply whose parent is itself an unbridged reply would cascade
+// into the parent being dropped, and the original reply along with it.
+func (h *APHandler) ensureObjectBridged(ctx context.Context, objectID string, depth int) (string, bool) {
+	// Already known (local object or previously stored mapping): nothing to do.
+	if id, ok := h.resolveNostrID(objectID); ok {
+		return id, true
 	}
+	if IsLocalID(objectID, h.LocalDomain) {
+		return "", false
+	}
+	if depth >= maxBridgeDepth {
+		return "", false
+	}
+
 	obj, err := FetchObject(ctx, objectID)
 	if err != nil {
-		return
+		return "", false
 	}
 	note := mapToNote(obj)
 	if note == nil {
-		return
+		return "", false
 	}
+
+	// Bridge the parent chain before this note so reply tags resolve.
+	if note.InReplyTo != "" {
+		h.ensureObjectBridged(ctx, note.InReplyTo, depth+1)
+	}
+
 	// Fetch the original author's actor so their NIP-05 handle is published
 	// as a kind-0 event. This matters for reposts (Announce) where the
 	// booster's metadata is fetched via HandleActivity but the boosted post's
@@ -917,13 +987,19 @@ func (h *APHandler) fetchAndCacheObject(ctx context.Context, objectID string) {
 	if note.AttributedTo != "" {
 		go h.fetchAndCacheActor(context.Background(), note.AttributedTo)
 	}
+
 	event, err := h.noteToEvent(ctx, note)
 	if err != nil || event == nil {
-		return
+		return "", false
 	}
-	if err := h.Store.AddObject(note.ID, event.ID); err == nil {
-		h.Publisher.Publish(ctx, event)
+	if err := h.Store.AddObject(note.ID, event.ID); err != nil {
+		slog.Warn("ensureObjectBridged: failed to store mapping", "id", objectID, "error", err)
+		return "", false
 	}
+	if err := h.Publisher.Publish(ctx, event); err != nil {
+		slog.Warn("ensureObjectBridged: publish failed", "id", objectID, "error", err)
+	}
+	return event.ID, true
 }
 
 func (h *APHandler) handleAccept(ctx context.Context, activity IncomingActivity) error {

@@ -35,11 +35,18 @@ type NormalizedPost struct {
 	// Media attachments.
 	Images []ImageInfo
 
-	// Threading (NIP-10 positional convention).
-	// If RootEventID is empty or equals ReplyToEventID, a single e-tag is emitted.
+	// Threading (NIP-10 marker convention).
+	// If RootEventID is empty or equals ReplyToEventID, a single "root"-marked
+	// e-tag is emitted (a direct reply to the thread root).
 	ReplyToEventID string
 	RootEventID    string
 	RelayHint      string // optional relay URL used in e/p/q tags
+
+	// Author pubkeys of the events being replied to. NIP-10 requires a reply
+	// to p-tag the author it responds to (so they are notified and clients can
+	// thread correctly). Optional; emitted only when ReplyToEventID is set.
+	ReplyToPubkey string
+	RootPubkey    string
 
 	// References.
 	MentionPubkeys []string // → p-tags
@@ -80,10 +87,9 @@ func BuildKind1Event(post NormalizedPost) *nostr.Event {
 		relay := post.RelayHint
 		root := post.RootEventID
 		if root == "" || root == post.ReplyToEventID {
-			// Direct reply to root: single e-tag with "reply" marker.
-			// Clients that don't understand markers fall back to positional
-			// (single e-tag = treat as both root and reply), which is fine.
-			tags = append(tags, nostr.Tag{"e", post.ReplyToEventID, relay, "reply"})
+			// NIP-10: a direct reply to the thread root has a single e-tag
+			// marked "root" (the root is also the event being responded to).
+			tags = append(tags, nostr.Tag{"e", post.ReplyToEventID, relay, "root"})
 		} else {
 			// Multi-level thread: root marker first, reply marker last.
 			tags = append(tags, nostr.Tag{"e", root, relay, "root"})
@@ -91,13 +97,28 @@ func BuildKind1Event(post NormalizedPost) *nostr.Event {
 		}
 	}
 
-	// Mention p-tags.
-	for _, pk := range post.MentionPubkeys {
+	// Mention p-tags. NIP-10 requires a reply to p-tag the author(s) it responds
+	// to, so the parent (and root) author pubkeys are emitted first and deduped
+	// against explicit mentions. Without these the replied-to author is never
+	// notified on Nostr and many clients fail to nest the reply.
+	seenP := make(map[string]bool)
+	addPTag := func(pk string) {
+		if pk == "" || seenP[pk] {
+			return
+		}
+		seenP[pk] = true
 		if post.RelayHint != "" {
 			tags = append(tags, nostr.Tag{"p", pk, post.RelayHint})
 		} else {
 			tags = append(tags, nostr.Tag{"p", pk})
 		}
+	}
+	if post.ReplyToEventID != "" {
+		addPTag(post.ReplyToPubkey)
+		addPTag(post.RootPubkey)
+	}
+	for _, pk := range post.MentionPubkeys {
+		addPTag(pk)
 	}
 
 	// Quote q-tag.

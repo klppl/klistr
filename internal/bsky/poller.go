@@ -315,16 +315,22 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 
 	// Thread reply posts. If the parent is not yet bridged, fetch and bridge
 	// the full ancestor chain first so we can attach a proper reply tag.
-	var replyToID, rootID string
+	var replyToID, rootID, replyToPubkey, rootPubkey string
 	if replyBlock, ok := record["reply"].(map[string]interface{}); ok {
+		parentURI := replyRefURI(replyBlock, "parent")
+		rootURI := replyRefURI(replyBlock, "root")
 		replyToID, rootID = p.resolveReplyRefs(replyBlock)
-		if replyToID == "" {
+		if replyToID == "" && parentURI != "" {
 			// Parent not in DB — fetch the thread and bridge missing ancestors.
-			if parentMap, ok2 := replyBlock["parent"].(map[string]interface{}); ok2 {
-				if parentURI, _ := parentMap["uri"].(string); parentURI != "" {
-					p.ensureAncestorsBridged(ctx, parentURI)
-					replyToID, rootID = p.resolveReplyRefs(replyBlock)
-				}
+			p.ensureAncestorsBridged(ctx, parentURI)
+			replyToID, rootID = p.resolveReplyRefs(replyBlock)
+		}
+		// NIP-10 reply p-tags: author of the parent (and root) being replied to.
+		replyToPubkey = p.pubkeyForDID(didFromATURI(parentURI))
+		rootPubkey = replyToPubkey
+		if rootURI != "" && rootURI != parentURI {
+			if pk := p.pubkeyForDID(didFromATURI(rootURI)); pk != "" {
+				rootPubkey = pk
 			}
 		}
 	}
@@ -341,6 +347,8 @@ func (p *Poller) bridgePost(ctx context.Context, post *TimelinePost) {
 		Images:         extractImagesFromRecord(record, post.Author.DID),
 		ReplyToEventID: replyToID,
 		RootEventID:    rootID,
+		ReplyToPubkey:  replyToPubkey,
+		RootPubkey:     rootPubkey,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
 		ContentWarning: extractContentWarning(record),
@@ -405,6 +413,39 @@ func (p *Poller) ensureAncestorsBridged(ctx context.Context, parentURI string) {
 	}
 }
 
+
+// didFromATURI extracts the authoring DID from an AT URI (at://did/collection/rkey).
+func didFromATURI(uri string) string {
+	rest := strings.TrimPrefix(uri, "at://")
+	did, _, _ := strings.Cut(rest, "/")
+	return did
+}
+
+// pubkeyForDID returns the Nostr public key for a Bluesky author DID: the local
+// user's real key when the DID is the bridge account itself, otherwise the
+// deterministic derived key. Returns "" when the DID is empty.
+func (p *Poller) pubkeyForDID(did string) string {
+	if did == "" {
+		return ""
+	}
+	if p.Client != nil && did == p.Client.DID() {
+		return p.LocalPubKey
+	}
+	e := &nostr.Event{}
+	if err := p.Signer.Sign(e, did); err != nil {
+		return ""
+	}
+	return e.PubKey
+}
+
+// replyRefURI returns reply[ref].uri ("parent" or "root") from a reply block.
+func replyRefURI(replyBlock map[string]interface{}, ref string) string {
+	if r, ok := replyBlock[ref].(map[string]interface{}); ok {
+		uri, _ := r["uri"].(string)
+		return uri
+	}
+	return ""
+}
 
 // resolveReplyRefs looks up Nostr event IDs for the parent and root of a
 // Bluesky reply record. Returns empty strings if either is not bridged.
@@ -557,12 +598,23 @@ func (p *Poller) bridgeReply(ctx context.Context, n *Notification) bool {
 		quoteEventID, _ = p.Store.GetNostrIDForObject(uri)
 	}
 
+	// NIP-10 reply p-tags: author of the parent (and root) being replied to.
+	replyToPubkey := p.pubkeyForDID(didFromATURI(parentURI))
+	rootPubkey := replyToPubkey
+	if rootURI != "" && rootURI != parentURI {
+		if pk := p.pubkeyForDID(didFromATURI(rootURI)); pk != "" {
+			rootPubkey = pk
+		}
+	}
+
 	np := bridge.NormalizedPost{
 		Content:        content,
 		CreatedAt:      nostr.Now(),
 		Images:         extractImagesFromRecord(record, n.Author.DID),
 		ReplyToEventID: parentNostrID,
 		RootEventID:    rootNostrID,
+		ReplyToPubkey:  replyToPubkey,
+		RootPubkey:     rootPubkey,
 		QuoteEventID:   quoteEventID,
 		Hashtags:       extractHashtagsFromRecord(record),
 		ContentWarning: extractContentWarning(record),

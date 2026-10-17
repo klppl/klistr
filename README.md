@@ -1,5 +1,7 @@
 # klistr
 
+[![License: Lagom](https://img.shields.io/badge/license-lagom-9E2B25)](https://klppl.github.io/lagom-license/)
+
 A self-hosted personal bridge that connects your Nostr identity to the Fediverse.
 
 You run one instance, for yourself. Your Nostr posts appear on the Fediverse and Bluesky. Fediverse users can follow you. It's your identity across all three networks, simultaneously.
